@@ -7,7 +7,7 @@
 //!
 //! 聚合内部保持顺序，聚合之间并行；队列空闲后自动回收。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,11 +37,14 @@ enum FollowUpKey {
     Session(String),
 }
 
-/// 一次状态落定及其聚合归属（入队前查好，避免处理时再查库）。
-struct FollowUp {
-    applied: StateApplied,
-    group_id: Option<String>,
-    workflow_id: Option<String>,
+/// 一次驱动任务：状态落定后的驱动，或群聊新消息触发的解析。
+enum FollowUp {
+    State {
+        applied: StateApplied,
+        group_id: Option<String>,
+        workflow_id: Option<String>,
+    },
+    GroupParse(String),
 }
 
 /// 按聚合拆分的驱动队列。只在事件循环线程投递，worker 独占消费自己的队列。
@@ -107,7 +110,7 @@ impl FollowUpQueues {
             loop {
                 match tokio::time::timeout(FOLLOWUP_IDLE_TIMEOUT, receiver.recv()).await {
                     Ok(Some(job)) => {
-                        handle_state_applied(job, &workflows, &groups, &automations, &store).await;
+                        handle_follow_up(job, &workflows, &groups, &automations, &store).await;
                     }
                     // 发送端全部断开（通常是 Server 关闭）。
                     Ok(None) => break,
@@ -128,17 +131,24 @@ impl FollowUpQueues {
 }
 
 fn follow_up_key(job: &FollowUp) -> FollowUpKey {
-    match (&job.group_id, &job.workflow_id) {
-        (Some(group_id), Some(workflow_id)) => {
-            log::warn!(
-                "会话同时属于群聊和工作流，按群聊队列串行: session={} group={group_id} workflow={workflow_id}",
-                job.applied.session_id
-            );
-            FollowUpKey::Group(group_id.clone())
-        }
-        (Some(group_id), None) => FollowUpKey::Group(group_id.clone()),
-        (None, Some(workflow_id)) => FollowUpKey::Workflow(workflow_id.clone()),
-        (None, None) => FollowUpKey::Session(job.applied.session_id.clone()),
+    match job {
+        FollowUp::GroupParse(group_id) => FollowUpKey::Group(group_id.clone()),
+        FollowUp::State {
+            applied,
+            group_id,
+            workflow_id,
+        } => match (group_id, workflow_id) {
+            (Some(group_id), Some(workflow_id)) => {
+                log::warn!(
+                    "会话同时属于群聊和工作流，按群聊队列串行: session={} group={group_id} workflow={workflow_id}",
+                    applied.session_id
+                );
+                FollowUpKey::Group(group_id.clone())
+            }
+            (Some(group_id), None) => FollowUpKey::Group(group_id.clone()),
+            (None, Some(workflow_id)) => FollowUpKey::Workflow(workflow_id.clone()),
+            (None, None) => FollowUpKey::Session(applied.session_id.clone()),
+        },
     }
 }
 
@@ -170,6 +180,7 @@ pub async fn run(
         let store = Arc::clone(&store);
         let jobs = db::blocking(move || {
             let mut jobs = Vec::new();
+            let mut parse_groups = HashSet::new();
             for event in events {
                 // 群聊成员输出需要引用普通会话消息 ID，apply 前先取出事件内容。
                 let agent_message = match &event {
@@ -183,18 +194,23 @@ pub async fn run(
                 let state = sessions.apply(event);
                 if let Some((agent_session_id, message_id)) = agent_message {
                     if let Some(session_id) = sessions.session_id_of_agent(&agent_session_id) {
-                        groups.on_member_output(&session_id, &message_id);
+                        if let Some(group_id) = groups.on_member_output(&session_id, &message_id) {
+                            parse_groups.insert(group_id);
+                        }
                     }
                 }
                 if let Some(applied) = state {
                     let group_id = store.group_of_session(&applied.session_id);
                     let workflow_id = store.workflow_of_session(&applied.session_id);
-                    jobs.push(FollowUp {
+                    jobs.push(FollowUp::State {
                         applied,
                         group_id,
                         workflow_id,
                     });
                 }
+            }
+            for group_id in parse_groups {
+                jobs.push(FollowUp::GroupParse(group_id));
             }
             jobs
         })
@@ -213,19 +229,25 @@ pub async fn run(
     // 事件通道关闭：让所有队列在空闲超时后自行回收，不阻塞 Server 关闭。
 }
 
-/// 状态落定后的驱动逻辑。同一聚合的 job 由同一个 worker 串行消费。
-async fn handle_state_applied(
+/// 驱动任务的处理逻辑。同一聚合的 job 由同一个 worker 串行消费。
+async fn handle_follow_up(
     job: FollowUp,
     workflows: &Arc<WorkflowService>,
     groups: &Arc<GroupService>,
     automations: &Arc<AutomationService>,
     store: &Arc<Store>,
 ) {
-    let FollowUp {
-        applied,
-        group_id,
-        workflow_id,
-    } = job;
+    let (applied, group_id, workflow_id) = match job {
+        FollowUp::GroupParse(group_id) => {
+            groups.parse(&group_id).await;
+            return;
+        }
+        FollowUp::State {
+            applied,
+            group_id,
+            workflow_id,
+        } => (applied, group_id, workflow_id),
+    };
     let session_id = applied.session_id.clone();
     let session = {
         let store = Arc::clone(store);
@@ -255,12 +277,18 @@ async fn handle_state_applied(
         {
             log::warn!("工作流状态驱动失败（{session_id}）: {error}");
         }
-        groups.on_member_idle(&session_id, applied.reason).await;
         let automations = Arc::clone(automations);
         let id = session_id.clone();
         let reason = applied.reason;
         if let Err(error) = db::blocking(move || automations.on_session_idle(&id, reason)).await {
             log::warn!("自动化会话状态处理失败（{session_id}）: {error}");
+        }
+    }
+
+    // 群聊驱动：成员会话状态变更后重算群聊状态并解析未解析消息
+    if applied.old_state != applied.new_state {
+        if let Some(group_id) = &group_id {
+            groups.on_member_state_change(group_id).await;
         }
     }
 

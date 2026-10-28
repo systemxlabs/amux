@@ -1,29 +1,35 @@
 //! 群聊会话：元数据（group.sqlite）、transcript（每群聊一个 transcript.sqlite）、
 //! 成员普通会话与 @ 驱动（docs/DESIGN.md「群聊会话驱动」「群聊会话存储」）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v2::TextContent;
 use amux_common::api::{Group, GroupMember, GroupMemberTemplate, GroupMessage};
-use amux_common::domain::{generate_title, rand_id, ContentBlock, SessionState, StateChangeReason};
+use amux_common::domain::{generate_title, rand_id, ContentBlock, SessionState};
 use uuid::Uuid;
 
 use crate::db;
 use crate::error::{ServerError, ServerResult};
 use crate::sessions::{CreateSessionParams, SessionService, SessionWorktree};
-use crate::store::{self, GroupRow, MemberRow, Store};
+use crate::store::{self, GroupMessageRow, GroupRow, MemberRow, Store};
 use crate::timestamps::now_ms;
 
 /// 群聊会话及成员普通会话的驱动逻辑。
 pub struct GroupService {
     store: Arc<Store>,
     sessions: Arc<SessionService>,
+    /// 串行化解析：同一批未解析消息只能被取走一次，避免并发触发重复驱动。
+    parse_lock: tokio::sync::Mutex<()>,
 }
 
 impl GroupService {
     pub fn new(store: Arc<Store>, sessions: Arc<SessionService>) -> Self {
-        Self { store, sessions }
+        Self {
+            store,
+            sessions,
+            parse_lock: tokio::sync::Mutex::new(()),
+        }
     }
 
     /// 新建群聊会话：先写群聊元数据，再逐个创建成员普通会话。
@@ -173,7 +179,7 @@ impl GroupService {
                 .insert_group_message(id, &rand_id(), None, None, Some(&content), now_ms());
             self.store.touch_group(id);
         });
-        self.drive_mentioned(id, &input).await;
+        self.parse(id).await;
         db::blocking_sync(|| self.recompute_state(id));
         log::info!("群聊指令已发送: group={id}");
         Ok(())
@@ -273,98 +279,33 @@ impl GroupService {
         }
     }
 
-    /// 成员普通会话进入空闲：解析自上次用户消息以来 agent 消息中的 @ 提及。
-    pub async fn on_member_idle(&self, session_id: &str, reason: StateChangeReason) {
-        let Some(member) = db::blocking_sync(|| self.store.group_member_by_session(session_id))
-        else {
+    /// 成员普通会话状态变更：重算群聊状态并触发解析。
+    pub async fn on_member_state_change(&self, group_id: &str) {
+        db::blocking_sync(|| self.recompute_state(group_id));
+        self.parse(group_id).await;
+    }
+
+    /// 解析群聊中已完整的未解析消息，驱动被 @ 的成员（docs/DESIGN.md「群聊会话驱动」）。
+    pub async fn parse(&self, group_id: &str) {
+        let guard = self.parse_lock.lock().await;
+        let pending = db::blocking_sync(|| take_pending(&self.store, group_id));
+        drop(guard);
+        let Some((mentions, unread_end)) = pending else {
             return;
         };
-        db::blocking_sync(|| self.recompute_state(&member.group_id));
-        if matches!(
-            reason,
-            StateChangeReason::Cancelled | StateChangeReason::Aborted
-        ) {
-            return;
-        }
-        let mentions = db::blocking_sync(|| {
-            let since = self
-                .store
-                .last_user_message_at(session_id, member.created_at);
-            self.mentions_in_messages(&member.group_id, since)
-        });
         for member_id in mentions {
-            self.drive_member(&member_id).await;
+            self.drive_member(&member_id, &unread_end).await;
         }
     }
 
     /// 成员普通会话产生 agent 输出：非空输出进入群聊消息（引用普通会话消息）。
-    pub fn on_member_output(&self, session_id: &str, message_id: &str) {
-        let Some(member) = self.store.group_member_by_session(session_id) else {
-            return;
-        };
-        let Some(content) = self.store.session_message(&member.session_id, message_id) else {
-            return;
-        };
-        if content.is_empty() || is_blank_output(&content) {
-            return;
-        }
-        self.store.insert_group_message(
-            &member.group_id,
-            &rand_id(),
-            Some(&member.id),
-            Some(message_id),
-            None,
-            now_ms(),
-        );
-        self.store.set_group_unread(&member.group_id, true);
-        self.store.touch_group(&member.group_id);
-    }
-
-    /// 解析用户消息中的 @ 提及并驱动对应成员。
-    async fn drive_mentioned(&self, group_id: &str, content: &[ContentBlock]) {
-        let text = blocks_text(content);
-        let members = db::blocking_sync(|| self.store.group_members(group_id));
-        for member_id in mentioned_members(&text, &members, None) {
-            self.drive_member(&member_id).await;
-        }
-    }
-
-    /// 解析未读窗口内所有群聊消息的 @ 提及（按成员去重）。
-    fn mentions_in_messages(&self, group_id: &str, since: u64) -> Vec<String> {
-        let members = self.store.group_members(group_id);
-        let mut seen = HashSet::new();
-        let mut mentions = Vec::new();
-        for row in self.store.group_messages_since(group_id, since) {
-            let text = match &row.member_id {
-                Some(member_id) => {
-                    let Some(member) = self.store.group_member(member_id) else {
-                        continue;
-                    };
-                    let Some(session_message_id) = row.session_message_id else {
-                        continue;
-                    };
-                    self.store
-                        .session_message(&member.session_id, &session_message_id)
-                        .map(|content| blocks_text(&content))
-                        .unwrap_or_default()
-                }
-                None => row
-                    .user_content
-                    .and_then(|content| serde_json::from_str::<Vec<ContentBlock>>(&content).ok())
-                    .map(|content| blocks_text(&content))
-                    .unwrap_or_default(),
-            };
-            for member_id in mentioned_members(&text, &members, row.member_id.as_deref()) {
-                if seen.insert(member_id.clone()) {
-                    mentions.push(member_id);
-                }
-            }
-        }
-        mentions
+    /// 返回新增消息所属的群聊 ID；同一流式消息的后续分片返回 None。
+    pub fn on_member_output(&self, session_id: &str, message_id: &str) -> Option<String> {
+        record_member_output(&self.store, session_id, message_id)
     }
 
     /// 驱动一个成员普通会话：以用户角色发送群聊未读消息与行为准则。
-    async fn drive_member(&self, member_id: &str) {
+    async fn drive_member(&self, member_id: &str, unread_end: &GroupMessageRow) {
         let Some((group_id, session_id, member_name, prompt)) = db::blocking_sync(|| {
             let member = self.store.group_member(member_id)?;
             let group = self.store.group(&member.group_id)?;
@@ -372,11 +313,15 @@ impl GroupService {
             let since = self
                 .store
                 .last_user_message_at(&member.session_id, member.created_at);
-            let unread = self
-                .store
-                .group_messages_since(&group.id, since)
-                .into_iter()
-                .filter_map(|row| self.unread_message(&row))
+            let mut rows = self.store.group_messages_since(&group.id, since);
+            // 未读列表截止到本次待解析列表的最后一条消息。
+            match rows.iter().position(|row| row.id == unread_end.id) {
+                Some(index) => rows.truncate(index + 1),
+                None => rows.clear(),
+            }
+            let unread = rows
+                .iter()
+                .filter_map(|row| self.unread_message(row))
                 .collect::<Vec<_>>();
             let prompt = drive_prompt(&member, &members, &unread);
             Some((
@@ -489,6 +434,99 @@ fn validate_members(members: &[GroupMemberTemplate]) -> ServerResult<()> {
     Ok(())
 }
 
+/// 成员普通会话产生 agent 输出：非空输出写入群聊消息引用。
+/// `created_at` 取该消息在成员普通会话中的创建时间，与成员会话时间线一致
+/// （docs/DESIGN.md「群聊会话存储」）。
+fn record_member_output(store: &Store, session_id: &str, message_id: &str) -> Option<String> {
+    let member = store.group_member_by_session(session_id)?;
+    let content = store.session_message(&member.session_id, message_id)?;
+    if content.is_empty() || is_blank_output(&content) {
+        return None;
+    }
+    let created_at = store.session_message_created_at(&member.session_id, message_id)?;
+    let inserted = store.insert_group_message(
+        &member.group_id,
+        &rand_id(),
+        Some(&member.id),
+        Some(message_id),
+        None,
+        created_at,
+    );
+    store.set_group_unread(&member.group_id, true);
+    store.touch_group(&member.group_id);
+    inserted.then_some(member.group_id)
+}
+
+/// 取出本次可解析的消息前缀，提取 @ 提及并置为已解析。
+///
+/// 待解析列表是未解析消息的前缀：遍历时遇到「状态工作中且其后没有该成员消息」的
+/// agent 消息即截止，这条消息可能仍在流式传输中（docs/DESIGN.md「群聊会话驱动」）。
+fn take_pending(store: &Store, group_id: &str) -> Option<(Vec<String>, GroupMessageRow)> {
+    let rows = store.unparsed_group_messages(group_id);
+    if rows.is_empty() {
+        return None;
+    }
+    let members = store.group_members(group_id);
+    let last_by_member = last_index_by_member(&rows);
+    let cutoff = rows
+        .iter()
+        .enumerate()
+        .find_map(|(index, row)| {
+            let member_id = row.member_id.as_deref()?;
+            let member = members.iter().find(|member| member.id == member_id)?;
+            if store.session(&member.session_id)?.state != SessionState::Busy {
+                return None;
+            }
+            (last_by_member.get(member_id) == Some(&index)).then_some(index)
+        })
+        .unwrap_or(rows.len());
+    if cutoff == 0 {
+        return None;
+    }
+
+    let pending = &rows[..cutoff];
+    let mut seen = HashSet::new();
+    let mut mentions = Vec::new();
+    for row in pending {
+        let Some(text) = message_text(store, row) else {
+            continue;
+        };
+        for member_id in mentioned_members(&text, &members, row.member_id.as_deref()) {
+            if seen.insert(member_id.clone()) {
+                mentions.push(member_id);
+            }
+        }
+    }
+    let last = pending.last()?.clone();
+    store.mark_group_messages_parsed_through(group_id, &last);
+    Some((mentions, last))
+}
+
+/// 每个成员在未解析列表中的最后一条消息下标。
+fn last_index_by_member(rows: &[GroupMessageRow]) -> HashMap<&str, usize> {
+    rows.iter()
+        .enumerate()
+        .filter_map(|(index, row)| row.member_id.as_deref().map(|id| (id, index)))
+        .collect()
+}
+
+/// 消息文本：用户消息直接解析，成员消息读取普通会话中的最新完整内容。
+fn message_text(store: &Store, row: &GroupMessageRow) -> Option<String> {
+    match &row.member_id {
+        Some(member_id) => {
+            let member = store.group_member(member_id)?;
+            let content =
+                store.session_message(&member.session_id, row.session_message_id.as_deref()?)?;
+            Some(blocks_text(&content))
+        }
+        None => {
+            let content =
+                serde_json::from_str::<Vec<ContentBlock>>(row.user_content.as_deref()?).ok()?;
+            Some(blocks_text(&content))
+        }
+    }
+}
+
 /// 按 `<成员名>` 解析消息中的 `@name`；用户名为 `user`，`@all` 匹配所有 agent 成员。
 ///
 /// 在整个消息内容中按大小写精确匹配（docs/DESIGN.md「群聊会话驱动」）。
@@ -585,6 +623,7 @@ fn drive_prompt(member: &MemberRow, members: &[MemberRow], unread: &[UnreadMessa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::GroupMemberInsert;
 
     fn member(id: &str, name: &str) -> MemberRow {
         MemberRow {
@@ -599,6 +638,167 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    fn session(id: &str) -> amux_common::api::Session {
+        amux_common::api::Session {
+            id: id.to_string(),
+            workflow_id: None,
+            group_id: None,
+            machine: "pc".into(),
+            agent: "codex".into(),
+            model: None,
+            title: String::new(),
+            state: SessionState::Idle,
+            project: None,
+            pinned: false,
+            unread: false,
+            workspace: "/tmp".into(),
+            worktree_dir: String::new(),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    /// 新建带两个成员（coder / reviewer）的群聊测试数据。
+    fn group_with_members(store: &Store) {
+        store.insert_group("g1", None, 1);
+        for (session_id, member_id, name) in [("s-m1", "m1", "coder"), ("s-m2", "m2", "reviewer")] {
+            store.insert_session(&session(session_id)).unwrap();
+            store.insert_group_member(&GroupMemberInsert {
+                id: member_id,
+                group_id: "g1",
+                machine: "pc",
+                agent: "codex",
+                session_id,
+                name,
+                description: "",
+                created_at: 1,
+            });
+        }
+    }
+
+    fn agent_message(
+        store: &Store,
+        member_id: &str,
+        session_id: &str,
+        id: &str,
+        text: &str,
+        at: u64,
+    ) {
+        store.upsert_message(
+            session_id,
+            id,
+            "agent",
+            &serde_json::to_string(&vec![ContentBlock::Text(TextContent::new(text))]).unwrap(),
+            at,
+        );
+        assert!(store.insert_group_message(
+            "g1",
+            &format!("g-{id}"),
+            Some(member_id),
+            Some(id),
+            None,
+            at
+        ));
+    }
+
+    /// 工作中的成员只解析到其最后一条消息之前：该消息可能仍在流式传输。
+    #[test]
+    fn pending_stops_before_working_members_last_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        group_with_members(&store);
+
+        store.insert_group_message(
+            "g1",
+            "u1",
+            None,
+            None,
+            Some(r#"[{"type":"text","text":"@coder 开始"}]"#),
+            10,
+        );
+        agent_message(&store, "m1", "s-m1", "a1", "完成，@reviewer 请审查", 20);
+        store.set_state("s-m1", SessionState::Busy);
+
+        // coder 工作中：自己最后一条消息作为截止点，只解析前面的用户消息
+        let (mentions, last) = take_pending(&store, "g1").unwrap();
+        assert_eq!(mentions, ["m1"]);
+        assert_eq!(last.id, "u1");
+        assert_eq!(
+            store
+                .unparsed_group_messages("g1")
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            ["g-a1"]
+        );
+
+        // coder 发出下一条消息后，上一条已完整，可以解析
+        agent_message(&store, "m1", "s-m1", "a2", "@reviewer 再看一次", 30);
+        let (mentions, last) = take_pending(&store, "g1").unwrap();
+        assert_eq!(mentions, ["m2"]);
+        assert_eq!(last.id, "g-a1");
+
+        // coder 回到空闲，最后一条消息也可解析
+        store.set_state("s-m1", SessionState::Idle);
+        let (mentions, last) = take_pending(&store, "g1").unwrap();
+        assert_eq!(mentions, ["m2"]);
+        assert_eq!(last.id, "g-a2");
+        assert!(store.unparsed_group_messages("g1").is_empty());
+    }
+
+    /// @all 展开为所有成员，发送者被排除，同一成员只驱动一次。
+    #[test]
+    fn pending_expands_all_excludes_sender_and_dedupes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        group_with_members(&store);
+
+        store.insert_group_message(
+            "g1",
+            "u1",
+            None,
+            None,
+            Some(r#"[{"type":"text","text":"@all 请开始"}]"#),
+            10,
+        );
+        let mut mentions = take_pending(&store, "g1").unwrap().0;
+        mentions.sort();
+        assert_eq!(mentions, ["m1", "m2"]);
+
+        agent_message(&store, "m1", "s-m1", "a1", "@all @coder @reviewer", 20);
+        assert_eq!(take_pending(&store, "g1").unwrap().0, ["m2"]);
+
+        // 同一消息重复写入不会新增行，也不会重复进入待解析列表
+        assert!(!store.insert_group_message("g1", "dup", Some("m1"), Some("a1"), None, 30));
+    }
+
+    /// 群聊 agent 消息的创建时间取自成员普通会话中的消息，而不是当前时刻。
+    #[test]
+    fn member_output_uses_session_message_created_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        group_with_members(&store);
+        store.upsert_message(
+            "s-m1",
+            "a1",
+            "agent",
+            &serde_json::to_string(&vec![ContentBlock::Text(TextContent::new("完成"))]).unwrap(),
+            42,
+        );
+
+        assert_eq!(
+            record_member_output(&store, "s-m1", "a1").as_deref(),
+            Some("g1")
+        );
+        let rows = store.unparsed_group_messages("g1");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_message_id.as_deref(), Some("a1"));
+        assert_eq!(rows[0].created_at, 42);
+
+        // 同一流式消息的后续分片不会新增群聊消息
+        assert_eq!(record_member_output(&store, "s-m1", "a1"), None);
     }
 
     #[test]

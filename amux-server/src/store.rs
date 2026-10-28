@@ -1049,6 +1049,7 @@ impl Store {
     }
 
     /// 追加一条群聊消息（用户消息直接存内容；成员消息存普通会话消息引用）。
+    /// 返回是否新增了消息行；流式分片命中同一成员消息时返回 false。
     pub fn insert_group_message(
         &self,
         group_id: &str,
@@ -1057,9 +1058,9 @@ impl Store {
         session_message_id: Option<&str>,
         user_content: Option<&str>,
         created_at: u64,
-    ) {
+    ) -> bool {
         let Ok(Some(conn)) = self.group_transcript(group_id, true) else {
-            return;
+            return false;
         };
         let conn = conn.lock();
         // ACP 流式消息会以同一 message_id 多次 upsert；群聊只保留一条引用，
@@ -1076,12 +1077,12 @@ impl Store {
                 )
                 .unwrap_or(false);
             if exists {
-                return;
+                return false;
             }
         }
-        let _ = conn.execute(
-            "INSERT OR IGNORE INTO messages (id, group_id, member_id, session_message_id, user_content, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        conn.execute(
+            "INSERT OR IGNORE INTO messages (id, group_id, member_id, session_message_id, user_content, parsed, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
             params![
                 id,
                 group_id,
@@ -1090,7 +1091,8 @@ impl Store {
                 user_content,
                 created_at as i64
             ],
-        );
+        )
+        .is_ok_and(|changed| changed > 0)
     }
 
     /// 获取群聊 transcript 连接；与普通会话 transcript 一样按群聊缓存。
@@ -1182,6 +1184,49 @@ impl Store {
         }
     }
 
+    /// 未解析的群聊消息（按时间正序）。
+    pub fn unparsed_group_messages(&self, group_id: &str) -> Vec<GroupMessageRow> {
+        let Some(conn) = self.group_transcript(group_id, false).ok().flatten() else {
+            return Vec::new();
+        };
+        let conn = conn.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT id, member_id, session_message_id, user_content, created_at FROM messages
+             WHERE parsed = 0 ORDER BY created_at ASC, id ASC",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |row| {
+            Ok(GroupMessageRow {
+                id: row.get(0)?,
+                member_id: row.get(1)?,
+                session_message_id: row.get(2)?,
+                user_content: row.get(3)?,
+                created_at: row.get::<_, i64>(4)? as u64,
+            })
+        });
+        match rows {
+            Ok(rows) => rows.flatten().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// 将截至 `last`（含）的未解析消息置为已解析。
+    ///
+    /// 未解析列表按 `(created_at, id)` 排序，待解析列表始终是它的前缀，
+    /// 因此按该二元组做一次范围更新即可，无需逐条 UPDATE。
+    pub fn mark_group_messages_parsed_through(&self, group_id: &str, last: &GroupMessageRow) {
+        let Some(conn) = self.group_transcript(group_id, false).ok().flatten() else {
+            return;
+        };
+        let _ = conn.lock().execute(
+            "UPDATE messages SET parsed = 1
+             WHERE parsed = 0 AND (created_at < ?1 OR (created_at = ?1 AND id <= ?2))",
+            params![last.created_at as i64, last.id],
+        );
+    }
+
     /// 成员普通会话上一次用户消息时刻；从未驱动过时取会话创建时间。
     pub fn last_user_message_at(&self, session_id: &str, fallback: u64) -> u64 {
         let Some(transcript) = self.transcript(session_id, false).ok().flatten() else {
@@ -1213,6 +1258,25 @@ impl Store {
             .ok()
             .flatten()?;
         serde_json::from_str(&content).ok()
+    }
+
+    /// 普通会话消息的创建时间（流式分片首片落盘时刻）。
+    ///
+    /// 群聊消息的 `created_at` 必须取自这里，保证与成员普通会话时间线一致
+    /// （docs/DESIGN.md「群聊会话存储」）。
+    pub fn session_message_created_at(&self, session_id: &str, message_id: &str) -> Option<u64> {
+        let transcript = self.transcript(session_id, false).ok()??;
+        let at = transcript
+            .lock()
+            .query_row(
+                "SELECT created_at FROM messages WHERE message_id = ?1",
+                params![message_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        at.map(|at| at as u64)
     }
 
     /// 群聊历史分页：解析成员消息引用为完整内容。
@@ -1800,8 +1864,8 @@ const GROUP_TRANSCRIPT_SCHEMA: &str = "
         member_id TEXT,
         session_message_id TEXT,
         user_content TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        parsed BOOL NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
     );";
 
 /// `automation.sqlite` 表结构（独立数据库按 docs/DESIGN.md「自动化存储」）。
