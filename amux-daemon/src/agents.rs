@@ -26,13 +26,13 @@ const KNOWN_AGENTS: &[&str] = &[amux_common::api::NANO_AGENT, "codex", "claude"]
 fn launch_spec(agent: &str) -> Option<LaunchSpec> {
     match agent {
         "codex" => Some(LaunchSpec {
-            program: "npx",
-            args: &["-y", "@agentclientprotocol/codex-acp"],
+            program: "codex-acp",
+            args: &[],
             env: &[("INITIAL_AGENT_MODE", "agent-full-access")],
         }),
         "claude" => Some(LaunchSpec {
-            program: "npx",
-            args: &["-y", "@agentclientprotocol/claude-agent-acp"],
+            program: "claude-agent-acp",
+            args: &[],
             env: &[("CLAUDE_AGENT_ACP_EXPERIMENTAL_V2", "1")],
         }),
         _ => None,
@@ -43,8 +43,8 @@ fn launch_spec(agent: &str) -> Option<LaunchSpec> {
 fn is_installed(agent: &str) -> bool {
     match agent {
         amux_common::api::NANO_AGENT => true,
-        // 官方 ACP 包内置对应 Agent，不依赖本机 codex/claude CLI
-        "codex" | "claude" => in_path("npx"),
+        "codex" => in_path("codex-acp"),
+        "claude" => in_path("claude-agent-acp"),
         _ => false,
     }
 }
@@ -73,6 +73,8 @@ pub struct AgentRegistry {
     agents: Mutex<HashMap<String, RunningAgent>>,
     nano_config: crate::nano::NanoConfig,
     next_instance: std::sync::atomic::AtomicU64,
+    /// 串行化升级：避免并发 npm 全局安装互相破坏
+    upgrade_lock: tokio::sync::Mutex<()>,
 }
 
 impl AgentRegistry {
@@ -81,6 +83,7 @@ impl AgentRegistry {
             agents: Mutex::new(HashMap::new()),
             nano_config: Default::default(),
             next_instance: std::sync::atomic::AtomicU64::new(1),
+            upgrade_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -144,6 +147,31 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// 升级指定 agent 到最新版本。
+    ///
+    /// 只执行全局 npm 安装，不重启正在运行的 agent；新版本在下次重启后生效。
+    pub async fn upgrade(&self, agent: &str) -> Result<(), String> {
+        let package = match agent {
+            amux_common::api::NANO_AGENT => return Ok(()),
+            "codex" => "@agentclientprotocol/codex-acp",
+            "claude" => "@agentclientprotocol/claude-agent-acp",
+            _ => return Err(format!("未知 agent: {agent}")),
+        };
+        let _guard = self.upgrade_lock.lock().await;
+        log::info!("升级 agent: agent={agent} package={package}");
+        let output = Command::new("npm")
+            .args(["install", "-g", package])
+            .output()
+            .await
+            .map_err(|error| format!("执行 npm 失败: {error}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("npm install 失败: {}", stderr.trim()));
+        }
+        log::info!("agent 升级完成: agent={agent}");
+        Ok(())
+    }
+
     /// Server 下行的 ACP 消息写入对应 agent 的 stdin。
     pub fn forward_to_agent(&self, agent: &str, raw: &str) -> Result<(), String> {
         let agents = self.agents.lock();
@@ -194,7 +222,7 @@ impl AgentRegistry {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // 独立进程组：npx 包装器会再拉起 node，重启时需整组回收
+        // 独立进程组：agent 可能再拉起子进程，重启时需整组回收
         #[cfg(unix)]
         command.process_group(0);
 
@@ -316,17 +344,26 @@ mod tests {
     #[test]
     fn claude_launch_spec_matches_design() {
         let spec = launch_spec("claude").expect("claude 应有启动配置");
-        assert_eq!(spec.program, "npx");
-        assert_eq!(spec.args, &["-y", "@agentclientprotocol/claude-agent-acp"]);
+        assert_eq!(spec.program, "claude-agent-acp");
+        assert!(spec.args.is_empty());
         assert_eq!(spec.env, &[("CLAUDE_AGENT_ACP_EXPERIMENTAL_V2", "1")]);
     }
 
     #[test]
     fn codex_launch_spec_matches_design() {
         let spec = launch_spec("codex").expect("codex 应有启动配置");
-        assert_eq!(spec.program, "npx");
-        assert_eq!(spec.args, &["-y", "@agentclientprotocol/codex-acp"]);
+        assert_eq!(spec.program, "codex-acp");
+        assert!(spec.args.is_empty());
         assert_eq!(spec.env, &[("INITIAL_AGENT_MODE", "agent-full-access")]);
+    }
+
+    #[tokio::test]
+    async fn nano_upgrade_is_noop() {
+        let registry = AgentRegistry::new();
+        registry
+            .upgrade(amux_common::api::NANO_AGENT)
+            .await
+            .expect("nano 升级应返回成功");
     }
 
     #[test]

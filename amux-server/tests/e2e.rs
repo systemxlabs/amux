@@ -87,27 +87,29 @@ fn daemon_binary() -> PathBuf {
     path
 }
 
-/// 假 bin 目录：`npx`（发现 codex/claude，并用于启动模拟 agent）。
+/// 假 bin 目录：`codex-acp` / `claude-agent-acp`（用于发现与启动模拟 agent）。
 fn fake_bin(mock_agent: &Path, state_file: &Path) -> PathBuf {
     let dir = state_file.parent().expect("状态文件目录").join("bin");
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("npx");
-    std::fs::write(
-        &file,
-        format!(
-            "#!/bin/sh\nexec '{}' '{}'\n",
-            mock_agent.display(),
-            state_file.display()
-        ),
-    )
-    .unwrap();
-    let mut permissions = std::fs::metadata(&file).unwrap().permissions();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        permissions.set_mode(0o755);
+    for name in ["codex-acp", "claude-agent-acp"] {
+        let file = dir.join(name);
+        std::fs::write(
+            &file,
+            format!(
+                "#!/bin/sh\nexec '{}' '{}'\n",
+                mock_agent.display(),
+                state_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            permissions.set_mode(0o755);
+        }
+        std::fs::set_permissions(&file, permissions).unwrap();
     }
-    std::fs::set_permissions(&file, permissions).unwrap();
     dir
 }
 

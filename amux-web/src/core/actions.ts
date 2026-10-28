@@ -1331,6 +1331,17 @@ export async function restartAgent(core: Core, machine: string, agent: string): 
   }
 }
 
+/** 升级指定机器上的 agent，新版本在该 agent 下次重启后生效。 */
+export async function upgradeAgent(core: Core, machine: string, agent: string): Promise<void> {
+  if (!core.client) return;
+  try {
+    await core.client.upgradeAgent(machine, agent);
+    core.success(`已升级 ${agent}@${machine}，重启后生效`);
+  } catch (error) {
+    core.failure(`升级失败：${messageOf(error)}`);
+  }
+}
+
 /**
  * 技能安装/更新/卸载：以机器临时目录为工作目录创建普通会话并发送指令
  * （docs/DESIGN.md「技能操作」），随后进入该会话供用户随时干预。

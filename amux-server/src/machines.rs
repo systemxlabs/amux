@@ -173,6 +173,30 @@ impl MachineHub {
         }
     }
 
+    /// 升级指定 agent 到最新版本，由 Daemon 执行安装命令。
+    pub async fn upgrade_agent(&self, machine_name: &str, agent: &str) -> ServerResult<()> {
+        let machine = self.machine(machine_name)?;
+        log::info!("收到升级 agent 请求: machine={machine_name} agent={agent}");
+        match machine
+            .request::<_, OpResult>(
+                method::AGENT_UPGRADE,
+                AgentParams {
+                    agent: agent.to_string(),
+                },
+            )
+            .await
+        {
+            Ok(_) => {
+                log::info!("agent 升级完成: machine={machine_name} agent={agent}");
+                Ok(())
+            }
+            Err(error) => {
+                log::warn!("agent 升级失败: machine={machine_name} agent={agent}: {error}");
+                Err(error)
+            }
+        }
+    }
+
     pub async fn fs_list(&self, machine: &str, params: FsListParams) -> ServerResult<FsListResult> {
         self.machine(machine)?
             .request(method::FS_LIST, params)
@@ -926,6 +950,10 @@ mod tests {
                 seen.lock().push("agent.restart".to_string());
                 serde_json::to_value(OpResult::ok()).unwrap()
             }
+            method::AGENT_UPGRADE => {
+                seen.lock().push("agent.upgrade".to_string());
+                serde_json::to_value(OpResult::ok()).unwrap()
+            }
             notify::ACP => {
                 let raw = value["params"]["raw"].as_str().unwrap();
                 let request: serde_json::Value = serde_json::from_str(raw).unwrap();
@@ -1081,6 +1109,19 @@ mod tests {
             task.await.unwrap().expect("并发取连接应成功");
         }
         assert_eq!(daemon.seen(), vec!["agent.restart", "initialize"]);
+    }
+
+    /// 升级请求经 Daemon 通道下发，不重建 ACP 连接。
+    #[tokio::test]
+    async fn upgrade_agent_forwards_to_daemon() {
+        let daemon = FakeDaemon::new(true);
+        daemon.attach();
+        daemon
+            .hub
+            .upgrade_agent("m", AGENT)
+            .await
+            .expect("升级应成功");
+        assert_eq!(daemon.seen(), vec!["agent.upgrade"]);
     }
 
     /// 本地无活跃连接记录时必须先重启 agent 再 initialize（docs/DESIGN.md「Agent 生命周期」）：

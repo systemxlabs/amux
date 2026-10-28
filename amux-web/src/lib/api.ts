@@ -121,6 +121,13 @@ export class ApiClient {
     );
   }
 
+  upgradeAgent(machine: string, agent: string): Promise<void> {
+    return this.postEmpty(
+      `/machines/${encodeURIComponent(machine)}/agents/${encodeURIComponent(agent)}/upgrade`,
+      {},
+    );
+  }
+
   /** 列目录；`dirsOnly` 只返回子目录（工作目录前缀匹配用）。 */
   listDir(
     machine: string,

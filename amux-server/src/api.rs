@@ -96,6 +96,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(restart_agent),
         )
         .route(
+            "/machines/{machine}/agents/{agent}/upgrade",
+            post(upgrade_agent),
+        )
+        .route(
             "/machines/{machine}/agents/{agent}/models",
             get(list_agent_models),
         )
@@ -302,6 +306,17 @@ async fn restart_agent(
     state
         .machines
         .restart_agent(&machine, &agent)
+        .await
+        .map(|_| Json(OpAck { ok: true }))
+}
+
+async fn upgrade_agent(
+    State(state): State<Arc<AppState>>,
+    Path((machine, agent)): Path<(String, String)>,
+) -> ApiResult<OpAck> {
+    state
+        .machines
+        .upgrade_agent(&machine, &agent)
         .await
         .map(|_| Json(OpAck { ok: true }))
 }

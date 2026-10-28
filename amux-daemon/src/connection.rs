@@ -285,6 +285,25 @@ async fn execute(
             );
             to_value(OpResult::ok())
         }
+        method::AGENT_UPGRADE => {
+            let params: AgentParams = decode(params)?;
+            log::info!(
+                "收到 agent 升级请求: machine={} agent={}",
+                daemon.machine,
+                params.agent
+            );
+            daemon
+                .agents
+                .upgrade(&params.agent)
+                .await
+                .map_err(RpcError::agent_unavailable)?;
+            log::info!(
+                "agent 升级请求完成: machine={} agent={}",
+                daemon.machine,
+                params.agent
+            );
+            to_value(OpResult::ok())
+        }
         method::GIT_DIFF => {
             let params: GitDiffParams = decode(params)?;
             if params.base.trim().is_empty() {

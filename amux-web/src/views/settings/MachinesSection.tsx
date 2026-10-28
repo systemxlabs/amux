@@ -5,13 +5,14 @@ import { useState } from "react";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
-import { rediscover, restartAgent } from "../../core/actions";
+import { rediscover, restartAgent, upgradeAgent } from "../../core/actions";
 import { useCore, useCoreState } from "../../core/store";
 
 /** 待二次确认的机器操作。 */
 type Pending =
   | { kind: "rediscover"; machine: string }
-  | { kind: "restart"; machine: string; agent: string };
+  | { kind: "restart"; machine: string; agent: string }
+  | { kind: "upgrade"; machine: string; agent: string };
 
 export function MachinesSection() {
   const core = useCore();
@@ -25,8 +26,10 @@ export function MachinesSection() {
     if (action === null) return;
     if (action.kind === "rediscover") {
       void rediscover(core, action.machine);
-    } else {
+    } else if (action.kind === "restart") {
       void restartAgent(core, action.machine, action.agent);
+    } else {
+      void upgradeAgent(core, action.machine, action.agent);
     }
   }
 
@@ -82,21 +85,36 @@ export function MachinesSection() {
                             打开会话 {agent.openedSessions}
                           </span>
                         </div>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="shrink-0"
-                          data-slot="agent-restart"
-                          onClick={() =>
-                            setPending({
-                              kind: "restart",
-                              machine: machine.name,
-                              agent: agent.name,
-                            })
-                          }
-                        >
-                          重启
-                        </Button>
+                        <div className="flex shrink-0 gap-1">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            data-slot="agent-restart"
+                            onClick={() =>
+                              setPending({
+                                kind: "restart",
+                                machine: machine.name,
+                                agent: agent.name,
+                              })
+                            }
+                          >
+                            重启
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            data-slot="agent-upgrade"
+                            onClick={() =>
+                              setPending({
+                                kind: "upgrade",
+                                machine: machine.name,
+                                agent: agent.name,
+                              })
+                            }
+                          >
+                            升级
+                          </Button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -108,13 +126,21 @@ export function MachinesSection() {
       )}
       <ConfirmDialog
         open={pending !== null}
-        title={pending?.kind === "restart" ? "重启 agent" : "重新发现机器"}
+        title={
+          pending?.kind === "restart"
+            ? "重启 agent"
+            : pending?.kind === "upgrade"
+              ? "升级 agent"
+              : "重新发现机器"
+        }
         description={
           pending === null
             ? undefined
             : pending.kind === "restart"
               ? `确认重启「${pending.agent}@${pending.machine}」？`
-              : `确认重新发现机器「${pending.machine}」上的 agents？`
+              : pending.kind === "upgrade"
+                ? `确认升级「${pending.agent}@${pending.machine}」到最新版本？`
+                : `确认重新发现机器「${pending.machine}」上的 agents？`
         }
         onConfirm={confirm}
         onCancel={() => setPending(null)}

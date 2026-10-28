@@ -16,6 +16,8 @@ pub mod method {
     pub const AGENT_MODELS: &str = "agent.models";
     /// 启动（未启动）或重启（已启动）指定 agent
     pub const AGENT_RESTART: &str = "agent.restart";
+    /// 升级指定 agent 到最新版本
+    pub const AGENT_UPGRADE: &str = "agent.upgrade";
     pub const GIT_DIFF: &str = "git.diff";
     pub const GIT_BRANCHES: &str = "git.branches";
     pub const GIT_CREATE_WORKTREE: &str = "git.create_worktree";
