@@ -665,7 +665,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
     session_message_id TEXT,             -- 普通会话消息 ID
     user_content TEXT,                   -- 用户消息内容，以 ACP ContentBlock 数组格式转 json 后存放
     parsed BOOL NOT NULL,                -- 是否已解析消息内容
-    created_at INTEGER NOT NULL          -- 创建时间
+    created_at INTEGER NOT NULL          -- 创建时间，agent 消息创建时间应与成员普通会话内一致
   );
   ```
 - 附件存储：存储在 `~/.amux/groups/<group_id>/attachments/` 目录下，每个附件保留原始后缀名，命名为 `<uuid>.<后缀>`
