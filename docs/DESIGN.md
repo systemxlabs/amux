@@ -329,6 +329,7 @@ Server 作为 ACP client 与 Agents 通信
 - 惰性恢复已有会话：等待用户往已有会话发送指令或查询会话选项时，才向 Agent 发送 `session/resume` 请求恢复 agent 侧已有会话
 - 设置会话选项：用户可基于当前会话可选项进行会话设置，Server 向 Agent 发送 `session/set_config_option` 请求进行设置
   - 如果普通会话设置了模型偏好，则在每次 `session/new` 和 `session/resume` 请求后立即发送 `session/set_config_option` 请求进行设置
+- 向 Agent 发送提示词时采用 steer 语义，ACP 支持前使用 `session/prompt`（部分 agent 实际实现是 steer 语义）
 - 主动关闭长时间无活动会话：当会话长时间无新活动（大于 24h）且会话状态为空闲时，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，释放资源
 - 取消会话：当用户取消会话时，向 Agent 发送 `session/cancel` 通知来取消会话执行
 - 删除会话：当用户删除会话时，如果会话已打开，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，如果 Agent 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
@@ -583,12 +584,20 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 ### 群聊会话驱动
 
 群聊会话 @ 驱动
-- 解析时机：当用户消息写入磁盘后，解析用户消息；当成员普通会话进入空闲状态时，解析自上次用户消息以来的所有 agent 消息
-- 解析方式：在整条消息文本中做大小写敏感的子串查找 `@all`、`@user` 和每个 `@<name>`
-- @ 某个 agent 成员时：驱动该 agent 成员普通会话
-- @all 时：驱动所有 agent 成员普通会话
-- @user 时：暂不处理
-- 每条群聊消息的 @ 驱动应当排除消息发送者和去重
+- 解析触发：有新消息写入群聊，或 agent 成员状态变更
+- 解析逻辑
+  - 获取所有未解析消息列表，按时间排序，依次遍历
+  - 如果该消息是用户消息，则跳到下一条消息
+  - 如果该消息是 agent 消息
+    - 如果该 agent 成员普通会话状态是空闲，则跳到下一条消息
+    - 如果该 agent 成员普通会话状态是工作中
+      - 如果后续消息含该 agent 消息，则跳到下一条消息
+      - 如果后续无该 agent 消息，则截止到该条消息（该消息可能还在流式传输中）
+  - 待解析消息列表从首条直至截止消息（不包含）构成
+  - 对每个待解析消息的文本做大小写敏感的子串查找 `@all`、`@user` 和每个 `@<name>`，`@all` 视为提及所有 agent 成员，`@user` 忽略，应当排除每条消息的发送者
+  - 对所有被 @ 的 agent 成员进行去重
+  - 将待解析消息全部置为已解析
+  - 对每个被 @ 的 agent 成员进行驱动
 
 成员普通会话驱动
 - 驱动消息内容模板
@@ -611,7 +620,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   ...
   </unread_messages>
   ```
-- 未读消息列表：从成员普通会话上一次用户消息时刻开始到当前时间内的所有群聊消息
+- 未读消息列表：从成员普通会话上一次用户消息时刻开始到待解析列表的最后一条消息
 
 ### 群聊会话存储
 
@@ -655,8 +664,8 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
     member_id TEXT,                      -- 群聊成员 ID，空则为用户消息
     session_message_id TEXT,             -- 普通会话消息 ID
     user_content TEXT,                   -- 用户消息内容，以 ACP ContentBlock 数组格式转 json 后存放
-    created_at INTEGER NOT NULL,         -- 创建时间
-    updated_at INTEGER NOT NULL          -- 更新时间
+    parsed BOOL NOT NULL,                -- 是否已解析消息内容
+    created_at INTEGER NOT NULL          -- 创建时间
   );
   ```
 - 附件存储：存储在 `~/.amux/groups/<group_id>/attachments/` 目录下，每个附件保留原始后缀名，命名为 `<uuid>.<后缀>`
