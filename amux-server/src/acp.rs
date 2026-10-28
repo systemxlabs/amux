@@ -12,6 +12,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::error::{ServerError, ServerResult};
 use agent_client_protocol::schema::v2::{
     AvailableCommand, AvailableCommandInput, CancelSessionNotification, ClientCapabilities,
     CloseSessionRequest, CompactionStatus, DeleteSessionRequest, IdleStateUpdate, Implementation,
@@ -136,37 +137,46 @@ pub enum CompactionPatch {
 }
 
 /// 会话层发往 ACP 连接的调用。
+///
+/// `session_id` 是 amux 会话 ID，仅用于把请求与 Server 日志对齐；
+/// `NewSession` 时 Agent 侧会话 ID 尚不存在，只能带这个 ID。
 enum Call {
     NewSession {
+        session_id: String,
         cwd: String,
-        reply: oneshot::Sender<Result<(String, Vec<SessionConfigOption>), String>>,
+        reply: oneshot::Sender<ServerResult<(String, Vec<SessionConfigOption>)>>,
     },
     ResumeSession {
+        session_id: String,
         agent_session_id: String,
         cwd: String,
-        reply: oneshot::Sender<Result<Vec<SessionConfigOption>, String>>,
+        reply: oneshot::Sender<ServerResult<Vec<SessionConfigOption>>>,
     },
     Prompt {
+        session_id: String,
         agent_session_id: String,
         input: Vec<ContentBlock>,
-        reply: oneshot::Sender<Result<String, String>>,
+        reply: oneshot::Sender<ServerResult<String>>,
     },
     Cancel {
         agent_session_id: String,
     },
     Close {
+        session_id: Option<String>,
         agent_session_id: String,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<ServerResult<()>>,
     },
     Delete {
+        session_id: String,
         agent_session_id: String,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<ServerResult<()>>,
     },
     SetConfigOption {
+        session_id: String,
         agent_session_id: String,
         config_id: String,
         value: SessionConfigOptionValue,
-        reply: oneshot::Sender<Result<Vec<SessionConfigOption>, String>>,
+        reply: oneshot::Sender<ServerResult<Vec<SessionConfigOption>>>,
     },
 }
 
@@ -186,109 +196,129 @@ impl AgentConnection {
 
     pub async fn new_session(
         &self,
+        session_id: &str,
         cwd: &str,
-    ) -> Result<(String, Vec<SessionConfigOption>), String> {
+    ) -> ServerResult<(String, Vec<SessionConfigOption>)> {
         let (tx, rx) = oneshot::channel();
         self.send(Call::NewSession {
+            session_id: session_id.to_string(),
             cwd: cwd.to_string(),
             reply: tx,
         })?;
-        rx.await.map_err(|_| "ACP 连接已关闭".to_string())?
+        rx.await
+            .map_err(|_| ServerError::acp_closed("ACP 连接已关闭"))?
     }
 
     pub async fn resume_session(
         &self,
+        session_id: &str,
         agent_session_id: &str,
         cwd: &str,
-    ) -> Result<Vec<SessionConfigOption>, String> {
+    ) -> ServerResult<Vec<SessionConfigOption>> {
         let (tx, rx) = oneshot::channel();
         self.send(Call::ResumeSession {
+            session_id: session_id.to_string(),
             agent_session_id: agent_session_id.to_string(),
             cwd: cwd.to_string(),
             reply: tx,
         })?;
-        rx.await.map_err(|_| "ACP 连接已关闭".to_string())?
+        rx.await
+            .map_err(|_| ServerError::acp_closed("ACP 连接已关闭"))?
     }
 
     pub async fn prompt(
         &self,
+        session_id: &str,
         agent_session_id: &str,
         input: Vec<ContentBlock>,
-    ) -> Result<String, String> {
+    ) -> ServerResult<String> {
         let (tx, rx) = oneshot::channel();
         self.send(Call::Prompt {
+            session_id: session_id.to_string(),
             agent_session_id: agent_session_id.to_string(),
             input,
             reply: tx,
         })?;
-        rx.await.map_err(|_| "ACP 连接已关闭".to_string())?
+        rx.await
+            .map_err(|_| ServerError::acp_closed("ACP 连接已关闭"))?
     }
 
-    pub fn cancel(&self, agent_session_id: &str) -> Result<(), String> {
+    pub fn cancel(&self, agent_session_id: &str) -> ServerResult<()> {
         self.send(Call::Cancel {
             agent_session_id: agent_session_id.to_string(),
         })
     }
 
-    pub async fn close(&self, agent_session_id: &str) -> Result<(), String> {
+    pub async fn close(
+        &self,
+        session_id: Option<&str>,
+        agent_session_id: &str,
+    ) -> ServerResult<()> {
         let (tx, rx) = oneshot::channel();
         self.calls
             .send(Call::Close {
+                session_id: session_id.map(str::to_string),
                 agent_session_id: agent_session_id.to_string(),
                 reply: tx,
             })
             .await
-            .map_err(|_| "ACP 连接已关闭".to_string())?;
-        rx.await.map_err(|_| "ACP 连接已关闭".to_string())?
+            .map_err(|_| ServerError::acp_closed("ACP 连接已关闭"))?;
+        rx.await
+            .map_err(|_| ServerError::acp_closed("ACP 连接已关闭"))?
     }
 
     /// 关闭该 ACP 连接当前打开的全部会话。
     pub async fn close_all(&self) {
         let sessions: Vec<_> = self.opened_sessions.lock().iter().cloned().collect();
         for agent_session_id in sessions {
-            if let Err(error) = self.close(&agent_session_id).await {
+            if let Err(error) = self.close(None, &agent_session_id).await {
                 log::warn!("session/close 失败（{agent_session_id}）: {error}");
             }
         }
     }
 
-    pub async fn delete(&self, agent_session_id: &str) -> Result<(), String> {
+    pub async fn delete(&self, session_id: &str, agent_session_id: &str) -> ServerResult<()> {
         if !self.supports_delete {
             log::debug!("Agent 不支持 session/delete，跳过: {agent_session_id}");
             return Ok(());
         }
         let (tx, rx) = oneshot::channel();
         self.send(Call::Delete {
+            session_id: session_id.to_string(),
             agent_session_id: agent_session_id.to_string(),
             reply: tx,
         })?;
-        rx.await.map_err(|_| "ACP 连接已关闭".to_string())?
+        rx.await
+            .map_err(|_| ServerError::acp_closed("ACP 连接已关闭"))?
     }
 
     pub async fn set_config_option(
         &self,
+        session_id: &str,
         agent_session_id: &str,
         config_id: &str,
         value: SessionConfigOptionValue,
-    ) -> Result<Vec<SessionConfigOption>, String> {
+    ) -> ServerResult<Vec<SessionConfigOption>> {
         let (tx, rx) = oneshot::channel();
         self.send(Call::SetConfigOption {
+            session_id: session_id.to_string(),
             agent_session_id: agent_session_id.to_string(),
             config_id: config_id.to_string(),
             value,
             reply: tx,
         })?;
-        rx.await.map_err(|_| "ACP 连接已关闭".to_string())?
+        rx.await
+            .map_err(|_| ServerError::acp_closed("ACP 连接已关闭"))?
     }
 
     pub fn opened_session_count(&self) -> usize {
         self.opened_sessions.lock().len()
     }
 
-    fn send(&self, call: Call) -> Result<(), String> {
+    fn send(&self, call: Call) -> ServerResult<()> {
         self.calls
             .try_send(call)
-            .map_err(|_| "ACP 连接忙或已关闭".to_string())
+            .map_err(|_| ServerError::acp_closed("ACP 连接忙或已关闭"))
     }
 }
 
@@ -311,9 +341,9 @@ pub async fn connect(
     incoming: mpsc::Receiver<String>,
     events: mpsc::UnboundedSender<AcpEvent>,
     config: Option<amux_common::api::OrchestratorConfig>,
-) -> Result<Arc<AgentConnection>, String> {
+) -> ServerResult<Arc<AgentConnection>> {
     let (calls_tx, mut calls_rx) = mpsc::channel::<Call>(64);
-    let (ready_tx, ready_rx) = oneshot::channel::<Result<bool, String>>();
+    let (ready_tx, ready_rx) = oneshot::channel::<ServerResult<bool>>();
     let opened_sessions = Arc::new(Mutex::new(HashSet::new()));
     let machine_name = machine.to_string();
     let agent_name = agent.to_string();
@@ -365,19 +395,23 @@ pub async fn connect(
                                     if !response.auth_methods.iter().any(|method| {
                                         method.method_id().to_string() == AMUX_AUTH_METHOD
                                     }) {
-                                        return Err("Nano 未声明配置认证方法".to_string());
+                                        return Err(ServerError::agent("Nano 未声明配置认证方法"));
                                     }
-                                    let config = config.ok_or("内置智能体未配置")?;
-                                    config.validate()?;
+                                    let config = config.ok_or_else(|| {
+                                        ServerError::invalid_input("内置智能体未配置")
+                                    })?;
+                                    config.validate().map_err(ServerError::invalid_input)?;
                                     request(
                                         &cx,
+                                        "auth/login",
+                                        &format!("agent={agent_name}"),
                                         agent_client_protocol::schema::v2::LoginAuthRequest::new(
                                             AMUX_AUTH_METHOD,
                                         )
                                         .meta(config.auth_meta()),
                                     )
                                     .await?;
-                                    Ok::<_, String>(())
+                                    Ok::<_, ServerError>(())
                                 }
                                 .await;
                                 if let Err(error) = login {
@@ -391,7 +425,8 @@ pub async fn connect(
                         }
                         Err(error) => {
                             let message = format!("initialize 失败: {error}");
-                            let _ = ready_tx.send(Err(message.clone()));
+                            log::warn!("{message}");
+                            let _ = ready_tx.send(Err(ServerError::agent(message.clone())));
                             return Err(agent_client_protocol::util::internal_error(message));
                         }
                     }
@@ -428,7 +463,7 @@ pub async fn connect(
 
     let supports_delete = ready_rx
         .await
-        .map_err(|_| "ACP 连接启动失败".to_string())
+        .map_err(|_| ServerError::acp_closed("ACP 连接启动失败"))
         .and_then(|result| result)?;
     Ok(Arc::new(AgentConnection {
         calls: calls_tx,
@@ -473,45 +508,70 @@ async fn handle_call(
     opened_sessions: &Mutex<HashSet<String>>,
 ) {
     match call {
-        Call::NewSession { cwd, reply } => match request(cx, NewSessionRequest::new(cwd)).await {
-            Ok(response) => {
-                let session_id = response.session_id.to_string();
-                let options = config_options(response.config_options);
-                opened_sessions.lock().insert(session_id.clone());
-                if reply.send(Ok((session_id.clone(), options))).is_err() {
-                    close_unclaimed_session(cx, opened_sessions, &session_id).await;
+        Call::NewSession {
+            session_id,
+            cwd,
+            reply,
+        } => {
+            let context = request_context(Some(&session_id), None);
+            match request(cx, "session/new", &context, NewSessionRequest::new(cwd)).await {
+                Ok(response) => {
+                    let agent_session_id = response.session_id.to_string();
+                    let options = config_options(response.config_options);
+                    opened_sessions.lock().insert(agent_session_id.clone());
+                    if reply.send(Ok((agent_session_id.clone(), options))).is_err() {
+                        close_unclaimed_session(cx, opened_sessions, &agent_session_id).await;
+                    }
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
                 }
             }
-            Err(error) => {
-                let _ = reply.send(Err(error));
-            }
-        },
+        }
         Call::ResumeSession {
+            session_id,
             agent_session_id,
             cwd,
             reply,
-        } => match request(cx, ResumeSessionRequest::new(agent_session_id.clone(), cwd)).await {
-            Ok(response) => {
-                opened_sessions.lock().insert(agent_session_id.clone());
-                if reply
-                    .send(Ok(config_options(response.config_options)))
-                    .is_err()
-                {
-                    close_unclaimed_session(cx, opened_sessions, &agent_session_id).await;
+        } => {
+            let context = request_context(Some(&session_id), Some(&agent_session_id));
+            match request(
+                cx,
+                "session/resume",
+                &context,
+                ResumeSessionRequest::new(agent_session_id.clone(), cwd),
+            )
+            .await
+            {
+                Ok(response) => {
+                    opened_sessions.lock().insert(agent_session_id.clone());
+                    if reply
+                        .send(Ok(config_options(response.config_options)))
+                        .is_err()
+                    {
+                        close_unclaimed_session(cx, opened_sessions, &agent_session_id).await;
+                    }
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
                 }
             }
-            Err(error) => {
-                let _ = reply.send(Err(error));
-            }
-        },
+        }
         Call::Prompt {
+            session_id,
             agent_session_id,
             input,
             reply,
         } => {
-            let result = request(cx, PromptRequest::new(agent_session_id, input))
-                .await
-                .map(|response| response.message_id.to_string());
+            let context = request_context(Some(&session_id), Some(&agent_session_id));
+            let result = request(
+                cx,
+                "session/prompt",
+                &context,
+                PromptRequest::new(agent_session_id, input),
+            )
+            .await
+            .map(|response| response.message_id.to_string());
             let _ = reply.send(result);
         }
         Call::Cancel { agent_session_id } => {
@@ -522,40 +582,55 @@ async fn handle_call(
             }
         }
         Call::Close {
+            session_id,
             agent_session_id,
             reply,
         } => {
-            let result = request(cx, CloseSessionRequest::new(agent_session_id.clone()))
-                .await
-                .map(|_| {
-                    opened_sessions.lock().remove(&agent_session_id);
-                })
-                .map_err(|error| format!("session/close 失败: {error}"));
+            let context = request_context(session_id.as_deref(), Some(&agent_session_id));
+            let result = request(
+                cx,
+                "session/close",
+                &context,
+                CloseSessionRequest::new(agent_session_id.clone()),
+            )
+            .await
+            .map(|_| {
+                opened_sessions.lock().remove(&agent_session_id);
+            });
             let _ = reply.send(result);
         }
         Call::Delete {
+            session_id,
             agent_session_id,
             reply,
         } => {
-            let result = request(cx, DeleteSessionRequest::new(agent_session_id.clone()))
-                .await
-                .map(|_| {
-                    opened_sessions.lock().remove(&agent_session_id);
-                });
+            let context = request_context(Some(&session_id), Some(&agent_session_id));
+            let result = request(
+                cx,
+                "session/delete",
+                &context,
+                DeleteSessionRequest::new(agent_session_id.clone()),
+            )
+            .await
+            .map(|_| {
+                opened_sessions.lock().remove(&agent_session_id);
+            });
             let _ = reply.send(result);
         }
         Call::SetConfigOption {
+            session_id,
             agent_session_id,
             config_id,
             value,
             reply,
         } => {
+            let context = request_context(Some(&session_id), Some(&agent_session_id));
             let set_option = SetSessionConfigOptionRequest::new(
                 agent_session_id,
                 config_id,
                 acp_config_value(&value),
             );
-            let result = request(cx, set_option)
+            let result = request(cx, "session/set_config_option", &context, set_option)
                 .await
                 .map(|response| config_options(response.config_options));
             let _ = reply.send(result);
@@ -569,7 +644,15 @@ async fn close_unclaimed_session(
     opened_sessions: &Mutex<HashSet<String>>,
     agent_session_id: &str,
 ) {
-    match request(cx, CloseSessionRequest::new(agent_session_id.to_string())).await {
+    let context = request_context(None, Some(agent_session_id));
+    match request(
+        cx,
+        "session/close",
+        &context,
+        CloseSessionRequest::new(agent_session_id.to_string()),
+    )
+    .await
+    {
         Ok(_) => {
             opened_sessions.lock().remove(agent_session_id);
         }
@@ -583,14 +666,48 @@ async fn close_unclaimed_session(
 /// 在途请求等不到应答，靠超时结束而不是永久挂起。
 const ACP_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 日志/错误中标识请求涉及哪个会话。
+fn request_context(session_id: Option<&str>, agent_session_id: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(session_id) = session_id {
+        parts.push(format!("session={session_id}"));
+    }
+    if let Some(agent_session_id) = agent_session_id {
+        parts.push(format!("agent_session={agent_session_id}"));
+    }
+    if parts.is_empty() {
+        "session=unknown".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
 async fn request<R: JsonRpcRequest>(
     cx: &V2ConnectionTo<Agent>,
+    method: &str,
+    context: &str,
     request: R,
-) -> Result<R::Response, String> {
-    tokio::time::timeout(ACP_REQUEST_TIMEOUT, cx.send_request(request).block_task())
-        .await
-        .map_err(|_| "ACP 请求超时".to_string())?
-        .map_err(|error| error.to_string())
+) -> ServerResult<R::Response> {
+    match tokio::time::timeout(ACP_REQUEST_TIMEOUT, cx.send_request(request).block_task()).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) => {
+            if agent_client_protocol::is_incoming_transport_closed(&error) {
+                Err(ServerError::acp_closed(format!(
+                    "ACP 连接已关闭: {method} ({context})"
+                )))
+            } else {
+                Err(ServerError::agent(format!(
+                    "ACP 请求失败: {method} ({context}): {error}"
+                )))
+            }
+        }
+        Err(_) => {
+            log::warn!("ACP 请求超时: method={method} {context}");
+            Err(ServerError::acp_timeout(format!(
+                "ACP 请求超时: {method} ({context})"
+            )))
+        }
+    }
 }
 
 /// ACP 通知 → 事件。消息/活动保留增量或快照语义，由存储层读取磁盘后合并。

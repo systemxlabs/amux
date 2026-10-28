@@ -33,6 +33,7 @@ use serde::Serialize;
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
 use crate::acp::{self, AcpEvent, AgentConnection};
+use crate::error::{ServerError, ServerResult};
 use crate::frames;
 use crate::terminals::TerminalCache;
 
@@ -57,7 +58,7 @@ struct Machine {
     info: Mutex<Option<MachineInfo>>,
     /// 最近一次握手读取的 Daemon 启动时间
     daemon_boot_time: Mutex<Option<String>>,
-    pending: Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>,
+    pending: Mutex<HashMap<u64, oneshot::Sender<ServerResult<serde_json::Value>>>>,
     next_id: AtomicU64,
     agents: Mutex<HashMap<String, AgentSlot>>,
     /// 按 agent 串行化连接建立：一个 agent 只有一条 stdio 连接，
@@ -100,7 +101,7 @@ impl MachineHub {
     }
 
     /// 查询机器上的 agents 与可用性（可用 = 已启动且 ACP 连接就绪）。
-    pub async fn agents(&self, machine_name: &str) -> Result<Vec<Agent>, String> {
+    pub async fn agents(&self, machine_name: &str) -> ServerResult<Vec<Agent>> {
         let machine = self.machine(machine_name)?;
         let discovered: AgentListResult = machine.request(method::AGENT_LIST, ()).await?;
         Ok(discovered
@@ -124,7 +125,7 @@ impl MachineHub {
         &self,
         machine_name: &str,
         agent: &str,
-    ) -> Result<Vec<AgentModel>, String> {
+    ) -> ServerResult<Vec<AgentModel>> {
         let machine = self.machine(machine_name)?;
         machine
             .request(
@@ -138,7 +139,7 @@ impl MachineHub {
 
     /// 重新发现 agents：发现、启动未运行者、建立 ACP 连接，再回报最新状态。
     /// 已启动且有活跃 ACP 连接记录的 agent 不重启。
-    pub async fn rediscover(&self, machine_name: &str) -> Result<Vec<Agent>, String> {
+    pub async fn rediscover(&self, machine_name: &str) -> ServerResult<Vec<Agent>> {
         log::info!("收到重新发现 agents 请求: machine={machine_name}");
         let machine = self.machine(machine_name)?;
         match self.start_agents(&machine, false).await {
@@ -154,7 +155,7 @@ impl MachineHub {
     }
 
     /// 重启（或启动）指定 agent，并重建 ACP 连接。
-    pub async fn restart_agent(&self, machine_name: &str, agent: &str) -> Result<(), String> {
+    pub async fn restart_agent(&self, machine_name: &str, agent: &str) -> ServerResult<()> {
         let machine = self.machine(machine_name)?;
         let lock = machine.connect_lock(agent);
         let _guard = lock.lock().await;
@@ -172,21 +173,13 @@ impl MachineHub {
         }
     }
 
-    pub async fn fs_list(
-        &self,
-        machine: &str,
-        params: FsListParams,
-    ) -> Result<FsListResult, String> {
+    pub async fn fs_list(&self, machine: &str, params: FsListParams) -> ServerResult<FsListResult> {
         self.machine(machine)?
             .request(method::FS_LIST, params)
             .await
     }
 
-    pub async fn fs_read(
-        &self,
-        machine: &str,
-        params: FsReadParams,
-    ) -> Result<FsReadResult, String> {
+    pub async fn fs_read(&self, machine: &str, params: FsReadParams) -> ServerResult<FsReadResult> {
         self.machine(machine)?
             .request(method::FS_READ, params)
             .await
@@ -197,7 +190,7 @@ impl MachineHub {
         machine: &str,
         repo: &str,
         base: &str,
-    ) -> Result<GitDiffResult, String> {
+    ) -> ServerResult<GitDiffResult> {
         self.machine(machine)?
             .request(
                 method::GIT_DIFF,
@@ -213,7 +206,7 @@ impl MachineHub {
         &self,
         machine: &str,
         repo: &str,
-    ) -> Result<GitBranchListResult, String> {
+    ) -> ServerResult<GitBranchListResult> {
         self.machine(machine)?
             .request(
                 method::GIT_BRANCHES,
@@ -230,7 +223,7 @@ impl MachineHub {
         repo: &str,
         base: &WorktreeBase,
         session_id: &str,
-    ) -> Result<String, String> {
+    ) -> ServerResult<String> {
         log::info!(
             "请求创建 worktree: session={session_id} machine={machine} repo={repo} base={}",
             base.display_name()
@@ -253,7 +246,7 @@ impl MachineHub {
     }
 
     #[allow(dead_code)]
-    pub async fn worktrees(&self, machine: &str, repo: &str) -> Result<Vec<String>, String> {
+    pub async fn worktrees(&self, machine: &str, repo: &str) -> ServerResult<Vec<String>> {
         let result: WorktreeListResult = self
             .machine(machine)?
             .request(
@@ -296,7 +289,7 @@ impl MachineHub {
         &self,
         machine: &str,
         params: TerminalOpenParams,
-    ) -> Result<String, String> {
+    ) -> ServerResult<String> {
         let result: TerminalOpenResult = self
             .machine(machine)?
             .request(method::TERMINAL_OPEN, params)
@@ -308,7 +301,7 @@ impl MachineHub {
         &self,
         machine: &str,
         params: TerminalInputParams,
-    ) -> Result<(), String> {
+    ) -> ServerResult<()> {
         let _: OpResult = self
             .machine(machine)?
             .request(method::TERMINAL_INPUT, params)
@@ -320,7 +313,7 @@ impl MachineHub {
         &self,
         machine: &str,
         params: TerminalResizeParams,
-    ) -> Result<(), String> {
+    ) -> ServerResult<()> {
         let _: OpResult = self
             .machine(machine)?
             .request(method::TERMINAL_RESIZE, params)
@@ -347,7 +340,7 @@ impl MachineHub {
     /// 本地没有活跃连接记录时必须先让 Daemon 重启 agent（docs/DESIGN.md「Agent 生命周期」）：
     /// ACP v2 每条连接只允许一次 initialize，向已初始化的 agent 进程再发 initialize 会被拒绝，
     /// 而该拒绝不会随重试消失，只能靠重启进程解决。
-    pub async fn acp(&self, machine: &str, agent: &str) -> Result<Arc<AgentConnection>, String> {
+    pub async fn acp(&self, machine: &str, agent: &str) -> ServerResult<Arc<AgentConnection>> {
         let machine = self.machine(machine)?;
         if let Some(conn) = machine.connection(agent) {
             return Ok(conn);
@@ -426,7 +419,7 @@ impl MachineHub {
         machine_name: String,
         boot_time: String,
         socket: WebSocket,
-    ) -> Result<(), String> {
+    ) -> ServerResult<()> {
         let machine = self.machine_slot(&machine_name);
         let (outgoing, mut frames) = mpsc::channel::<String>(256);
         *machine.ws.lock() = Some(outgoing.clone());
@@ -492,7 +485,7 @@ impl MachineHub {
         }
         let pending: Vec<_> = machine.pending.lock().drain().map(|(_, tx)| tx).collect();
         for tx in pending {
-            let _ = tx.send(Err("Daemon 连接已断开".to_string()));
+            let _ = tx.send(Err(ServerError::machine_offline("Daemon 连接已断开")));
         }
         log::info!("Daemon 连接断开: {machine_name}");
         Ok(())
@@ -535,7 +528,7 @@ impl MachineHub {
                 };
                 let result = match (response.result, response.error) {
                     (Some(result), _) => Ok(result),
-                    (None, Some(error)) => Err(error.message),
+                    (None, Some(error)) => Err(ServerError::invalid_input(error.message)),
                     (None, None) => Ok(serde_json::Value::Null),
                 };
                 let _ = tx.send(result);
@@ -582,7 +575,7 @@ impl MachineHub {
 
     /// Agent 生命周期（docs/DESIGN.md「Agent 生命周期」）：`rebuild` 时逐个重启 agent 并初始化；
     /// 不重建时未启动的 agent 启动并初始化，已启动且 Server 持有活跃 ACP 连接记录的 agent 直接复用。
-    async fn start_agents(&self, machine: &Arc<Machine>, rebuild: bool) -> Result<(), String> {
+    async fn start_agents(&self, machine: &Arc<Machine>, rebuild: bool) -> ServerResult<()> {
         let list: AgentListResult = machine.request(method::AGENT_LIST, ()).await?;
         for agent in list.agents {
             // 复用仅在不重建、agent 已启动且确有活跃连接记录时成立；
@@ -616,7 +609,7 @@ impl MachineHub {
         &self,
         machine: &Arc<Machine>,
         agent: &str,
-    ) -> Result<Arc<AgentConnection>, String> {
+    ) -> ServerResult<Arc<AgentConnection>> {
         log::info!(
             "重启 agent 并重建 ACP 连接: machine={} agent={agent}",
             machine.name
@@ -637,7 +630,7 @@ impl MachineHub {
         &self,
         machine: &Arc<Machine>,
         agent: &str,
-    ) -> Result<Arc<AgentConnection>, String> {
+    ) -> ServerResult<Arc<AgentConnection>> {
         let (inbound_tx, inbound_rx) = mpsc::channel::<String>(256);
         // 先登记入站通道：initialize 的应答可能在连接建立完成前就到达，
         // 未登记就会被当作「未连接 agent 的消息」丢弃，握手随之超时。
@@ -686,13 +679,13 @@ impl MachineHub {
         });
     }
 
-    fn machine(&self, name: &str) -> Result<Arc<Machine>, String> {
+    fn machine(&self, name: &str) -> ServerResult<Arc<Machine>> {
         self.machines
             .lock()
             .get(name)
             .filter(|machine| machine.is_connected())
             .cloned()
-            .ok_or_else(|| "机器未连接".to_string())
+            .ok_or_else(|| ServerError::machine_offline("机器未连接"))
     }
 }
 
@@ -765,7 +758,7 @@ impl Machine {
         &self,
         method: &str,
         params: P,
-    ) -> Result<R, String> {
+    ) -> ServerResult<R> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
         let (tx, rx) = oneshot::channel();
         self.pending.lock().insert(id, tx);
@@ -773,22 +766,24 @@ impl Machine {
             .map_err(|error| format!("请求序列化失败: {error}"))?;
         let Some(ws) = self.ws.lock().clone() else {
             self.pending.lock().remove(&id);
-            return Err("Daemon 连接已断开".to_string());
+            return Err(ServerError::machine_offline("Daemon 连接已断开"));
         };
         if ws.send(frame).await.is_err() {
             self.pending.lock().remove(&id);
-            return Err("Daemon 连接已关闭".to_string());
+            return Err(ServerError::machine_offline("Daemon 连接已关闭"));
         }
         let response = match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
             Ok(Ok(response)) => response,
-            Ok(Err(_)) => return Err("Daemon 连接已关闭".to_string()),
+            Ok(Err(_)) => return Err(ServerError::machine_offline("Daemon 连接已关闭")),
             Err(_) => {
                 self.pending.lock().remove(&id);
-                return Err(format!("Daemon 请求超时: {method}"));
+                return Err(ServerError::machine_offline(format!(
+                    "Daemon 请求超时: {method}"
+                )));
             }
         }?;
         serde_json::from_value(response)
-            .map_err(|error| format!("应答解析失败（{method}）: {error}"))
+            .map_err(|error| ServerError::internal(format!("应答解析失败（{method}）: {error}")))
     }
 }
 

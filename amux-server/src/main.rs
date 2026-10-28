@@ -8,6 +8,8 @@ mod api;
 mod attachments;
 mod automations;
 mod config_store;
+mod db;
+mod error;
 mod events;
 mod frames;
 mod groups;
@@ -125,7 +127,7 @@ async fn run(args: Args) -> Result<(), String> {
             loop {
                 tokio::time::sleep(MAINTENANCE_INTERVAL).await;
                 sessions.maintain().await;
-                workflows.maintain();
+                crate::db::blocking_sync(|| workflows.maintain());
             }
         }
     });

@@ -17,6 +17,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::config_store::ConfigStore;
+use crate::db;
+use crate::error::{ServerError, ServerResult};
 use crate::groups::GroupService;
 use crate::sessions::{SessionService, SessionWorktree};
 use crate::store::{AutomationRow, Store};
@@ -79,15 +81,15 @@ impl AutomationService {
             .collect()
     }
 
-    pub fn get(&self, id: &str) -> Result<Automation, String> {
+    pub fn get(&self, id: &str) -> ServerResult<Automation> {
         let row = self
             .store
             .automation(id)
-            .ok_or("自动化不存在".to_string())?;
+            .ok_or_else(|| ServerError::not_found("自动化不存在"))?;
         Ok(self.view(row))
     }
 
-    pub fn create(&self, input: AutomationInput) -> Result<Automation, String> {
+    pub fn create(&self, input: AutomationInput) -> ServerResult<Automation> {
         let input = normalize_input(input)?;
         let id = Uuid::new_v4().to_string();
         let now = now_ms();
@@ -96,18 +98,18 @@ impl AutomationService {
         self.get(&id)
     }
 
-    pub fn update(&self, id: &str, input: AutomationInput) -> Result<Automation, String> {
+    pub fn update(&self, id: &str, input: AutomationInput) -> ServerResult<Automation> {
         let input = normalize_input(input)?;
         if !self.store.update_automation(id, &input, now_ms()) {
-            return Err("自动化不存在".to_string());
+            return Err(ServerError::not_found("自动化不存在"));
         }
         log::info!("自动化已更新: automation={id}");
         self.get(id)
     }
 
-    pub fn delete(&self, id: &str) -> Result<(), String> {
+    pub fn delete(&self, id: &str) -> ServerResult<()> {
         if !self.store.delete_automation(id) {
-            return Err("自动化不存在".to_string());
+            return Err(ServerError::not_found("自动化不存在"));
         }
         log::info!("自动化已删除: automation={id}");
         Ok(())
@@ -118,19 +120,19 @@ impl AutomationService {
         id: &str,
         limit: usize,
         offset: usize,
-    ) -> Result<(Vec<AutomationRun>, bool), String> {
+    ) -> ServerResult<(Vec<AutomationRun>, bool)> {
         self.store
             .automation(id)
-            .ok_or("自动化不存在".to_string())?;
+            .ok_or_else(|| ServerError::not_found("自动化不存在"))?;
         Ok(self.store.automation_runs_page(id, limit, offset))
     }
 
     /// 手动或触发器发起一次运行。
-    pub async fn trigger(self: &Arc<Self>, id: &str) -> Result<AutomationRun, String> {
-        let automation = self.get(id)?;
+    pub async fn trigger(self: &Arc<Self>, id: &str) -> ServerResult<AutomationRun> {
+        let automation = db::blocking_sync(|| self.get(id))?;
         let run_id = Uuid::new_v4().to_string();
         let now = now_ms();
-        self.store.insert_automation_run(&AutomationRun {
+        let run = AutomationRun {
             id: run_id.clone(),
             automation_id: automation.id.clone(),
             session_id: None,
@@ -142,14 +144,15 @@ impl AutomationService {
             created_at: now,
             started_at: None,
             finished_at: None,
-        });
+        };
+        db::blocking_sync(|| self.store.insert_automation_run(&run));
 
         let prompt = || {
             vec![ContentBlock::Text(TextContent::new(
                 automation.task.clone(),
             ))]
         };
-        let target_result: Result<RunTarget, String> = async {
+        let target_result: ServerResult<RunTarget> = async {
             match &automation.session_options {
                 AutomationSessionOptions::ExistingSession { session_id } => {
                     self.sessions.prompt(session_id, prompt()).await?;
@@ -186,7 +189,9 @@ impl AutomationService {
                         })
                         .await?;
                     if !automation.title.trim().is_empty() {
-                        self.store.set_title(&session.id, automation.title.trim());
+                        db::blocking_sync(|| {
+                            self.store.set_title(&session.id, automation.title.trim())
+                        });
                     }
                     self.sessions.prompt(&session.id, prompt()).await?;
                     Ok(RunTarget::Session(session.id))
@@ -213,12 +218,13 @@ impl AutomationService {
         let target = match target_result {
             Ok(target) => target,
             Err(error) => {
-                self.store.fail_automation_run(&run_id, &error, now_ms());
+                let message = error.to_string();
+                db::blocking_sync(|| self.store.fail_automation_run(&run_id, &message, now_ms()));
                 return Err(error);
             }
         };
         let started_at = now_ms();
-        match &target {
+        db::blocking_sync(|| match &target {
             RunTarget::Session(session_id) => {
                 self.store
                     .start_automation_run(&run_id, Some(session_id), None, None, started_at);
@@ -231,39 +237,44 @@ impl AutomationService {
                 self.store
                     .start_automation_run(&run_id, None, None, Some(group_id), started_at);
             }
-        }
+        });
         log::info!("自动化已触发: automation={id} run={run_id}");
-        self.store
-            .automation_run(&run_id)
-            .ok_or_else(|| "运行记录写入失败".to_string())
+        db::blocking_sync(|| self.store.automation_run(&run_id))
+            .ok_or_else(|| ServerError::internal("运行记录写入失败"))
     }
 
     /// 周期性回收已完成但未收到状态通知的运行（主要覆盖自主结束的工作流会话）。
     async fn reconcile_runs(self: &Arc<Self>) {
         let now = now_ms();
-        for run in self.store.running_automation_runs() {
+        let runs = db::blocking_sync(|| self.store.running_automation_runs());
+        for run in runs {
             if now.saturating_sub(run.started_at.unwrap_or(run.created_at)) < 30_000 {
                 continue;
             }
-            let idle_session = run.session_id.as_deref().is_some_and(|session_id| {
-                self.store
-                    .session(session_id)
-                    .is_some_and(|session| session.state == amux_common::domain::SessionState::Idle)
-            });
-            let idle_workflow = run.workflow_id.as_deref().is_some_and(|workflow_id| {
-                self.store.workflow(workflow_id).is_some_and(|workflow| {
-                    workflow.state == amux_common::domain::SessionState::Idle
-                })
-            });
-            let idle_group = run.group_id.as_deref().is_some_and(|group_id| {
-                self.store
-                    .group(group_id)
-                    .is_some_and(|group| group.state == amux_common::domain::SessionState::Idle)
-            });
-            if idle_session || idle_workflow || idle_group {
+            let idle = db::blocking_sync(|| self.run_is_idle(&run));
+            if idle {
                 self.finish_run(&run).await;
             }
         }
+    }
+
+    fn run_is_idle(&self, run: &AutomationRun) -> bool {
+        let idle_session = run.session_id.as_deref().is_some_and(|session_id| {
+            self.store
+                .session(session_id)
+                .is_some_and(|session| session.state == amux_common::domain::SessionState::Idle)
+        });
+        let idle_workflow = run.workflow_id.as_deref().is_some_and(|workflow_id| {
+            self.store
+                .workflow(workflow_id)
+                .is_some_and(|workflow| workflow.state == amux_common::domain::SessionState::Idle)
+        });
+        let idle_group = run.group_id.as_deref().is_some_and(|group_id| {
+            self.store
+                .group(group_id)
+                .is_some_and(|group| group.state == amux_common::domain::SessionState::Idle)
+        });
+        idle_session || idle_workflow || idle_group
     }
 
     /// 普通会话结束时的主动回收。
@@ -274,9 +285,11 @@ impl AutomationService {
         let service = Arc::clone(self);
         tokio::spawn(async move {
             if reason == StateChangeReason::Aborted {
-                service
-                    .store
-                    .fail_automation_run(&run.id, "会话异常终止", now_ms());
+                db::blocking_sync(|| {
+                    service
+                        .store
+                        .fail_automation_run(&run.id, "会话异常终止", now_ms())
+                });
                 return;
             }
             service.finish_run(&run).await;
@@ -306,38 +319,44 @@ impl AutomationService {
     }
 
     async fn finish_run(&self, run: &AutomationRun) {
-        let Some(automation) = self.store.automation(&run.automation_id) else {
-            self.store
-                .fail_automation_run(&run.id, "自动化不存在", now_ms());
+        let automation = db::blocking_sync(|| self.store.automation(&run.automation_id));
+        let Some(automation) = automation else {
+            db::blocking_sync(|| {
+                self.store
+                    .fail_automation_run(&run.id, "自动化不存在", now_ms())
+            });
             return;
         };
         let finished_at = now_ms();
-        self.store.finish_automation_run(&run.id, finished_at);
+        db::blocking_sync(|| self.store.finish_automation_run(&run.id, finished_at));
         let started_at = run.started_at.unwrap_or(run.created_at);
-        let context = match (&run.session_id, &run.workflow_id, &run.group_id) {
-            (Some(session_id), _, _) => session_context(
-                &self.sessions,
-                session_id,
-                &automation.task,
-                started_at,
-                finished_at,
-            ),
-            (_, Some(workflow_id), _) => workflow_context(
-                &self.workflows,
-                workflow_id,
-                &automation.task,
-                started_at,
-                finished_at,
-            ),
-            (_, _, Some(group_id)) => group_context(
-                &self.groups,
-                group_id,
-                &automation.task,
-                started_at,
-                finished_at,
-            ),
-            _ => Err("自动化运行缺少会话".into()),
-        };
+        let context =
+            db::blocking_sync(
+                || match (&run.session_id, &run.workflow_id, &run.group_id) {
+                    (Some(session_id), _, _) => session_context(
+                        &self.sessions,
+                        session_id,
+                        &automation.task,
+                        started_at,
+                        finished_at,
+                    ),
+                    (_, Some(workflow_id), _) => workflow_context(
+                        &self.workflows,
+                        workflow_id,
+                        &automation.task,
+                        started_at,
+                        finished_at,
+                    ),
+                    (_, _, Some(group_id)) => group_context(
+                        &self.groups,
+                        group_id,
+                        &automation.task,
+                        started_at,
+                        finished_at,
+                    ),
+                    _ => Err(ServerError::internal("自动化运行缺少会话")),
+                },
+            );
         match context {
             Ok(context) => match self.classify(&automation.result_labels, &context).await {
                 Ok(label) => {
@@ -346,13 +365,19 @@ impl AutomationService {
                 }
                 Err(error) => {
                     log::warn!("自动化结果分类失败: run={}: {error}", run.id);
-                    self.store
-                        .set_automation_run_label(&run.id, None, Some(&error));
+                    let message = error.to_string();
+                    db::blocking_sync(|| {
+                        self.store
+                            .set_automation_run_label(&run.id, None, Some(&message))
+                    });
                 }
             },
             Err(error) => {
-                self.store
-                    .set_automation_run_label(&run.id, None, Some(&error));
+                let message = error.to_string();
+                db::blocking_sync(|| {
+                    self.store
+                        .set_automation_run_label(&run.id, None, Some(&message))
+                });
             }
         }
     }
@@ -361,12 +386,14 @@ impl AutomationService {
         &self,
         labels: &[AutomationResultLabel],
         context: &str,
-    ) -> Result<String, String> {
+    ) -> ServerResult<String> {
         let config = self
             .config
             .automation()
-            .ok_or("自动化决策模型未配置，无法进行结果分类")?;
-        crate::system_one::evaluate_choice(&config, labels, context).await
+            .ok_or_else(|| ServerError::invalid_input("自动化决策模型未配置，无法进行结果分类"))?;
+        crate::system_one::evaluate_choice(&config, labels, context)
+            .await
+            .map_err(ServerError::agent)
     }
 
     fn view(&self, row: AutomationRow) -> Automation {
@@ -397,9 +424,8 @@ impl AutomationService {
             *last = now;
             from
         };
-        let due: Vec<String> = self
-            .store
-            .automations()
+        let automations = db::blocking_sync(|| self.store.automations());
+        let due: Vec<String> = automations
             .into_iter()
             .filter(|automation| automation.enabled)
             .filter(|automation| {
@@ -426,18 +452,17 @@ impl AutomationService {
         self: &Arc<Self>,
         event: &str,
         body: &Value,
-    ) -> Result<usize, String> {
+    ) -> ServerResult<usize> {
         let repository = body
             .pointer("/repository/full_name")
             .and_then(Value::as_str)
-            .ok_or("Webhook 缺少 repository.full_name".to_string())?;
+            .ok_or_else(|| ServerError::invalid_input("Webhook 缺少 repository.full_name"))?;
         let event = event.trim();
         if event.is_empty() {
-            return Err("缺少 X-GitHub-Event 请求头".into());
+            return Err(ServerError::invalid_input("缺少 X-GitHub-Event 请求头"));
         }
-        let matches: Vec<String> = self
-            .store
-            .automations()
+        let automations = db::blocking_sync(|| self.store.automations());
+        let matches: Vec<String> = automations
             .into_iter()
             .filter(|automation| automation.enabled)
             .filter(|automation| {
@@ -461,7 +486,7 @@ impl AutomationService {
     }
 }
 
-fn normalize_input(mut input: AutomationInput) -> Result<AutomationInput, String> {
+fn normalize_input(mut input: AutomationInput) -> ServerResult<AutomationInput> {
     input.title = input.title.trim().to_string();
     input.task = input.task.trim().to_string();
     input.result_labels = normalize_labels(input.result_labels)?;
@@ -469,20 +494,20 @@ fn normalize_input(mut input: AutomationInput) -> Result<AutomationInput, String
     normalize_session_options(&mut input.session_options);
 
     if input.title.is_empty() {
-        return Err("标题不能为空".into());
+        return Err(ServerError::invalid_input("标题不能为空"));
     }
     if input.task.is_empty() {
-        return Err("任务不能为空".into());
+        return Err(ServerError::invalid_input("任务不能为空"));
     }
     match &input.session_options {
         AutomationSessionOptions::ExistingSession { session_id } if session_id.is_empty() => {
-            return Err("已有普通会话不能为空".into());
+            return Err(ServerError::invalid_input("已有普通会话不能为空"));
         }
         AutomationSessionOptions::ExistingWorkflow { workflow_id } if workflow_id.is_empty() => {
-            return Err("已有工作流会话不能为空".into());
+            return Err(ServerError::invalid_input("已有工作流会话不能为空"));
         }
         AutomationSessionOptions::ExistingGroup { group_id } if group_id.is_empty() => {
-            return Err("已有群聊会话不能为空".into());
+            return Err(ServerError::invalid_input("已有群聊会话不能为空"));
         }
         AutomationSessionOptions::NewSession {
             machine,
@@ -490,31 +515,32 @@ fn normalize_input(mut input: AutomationInput) -> Result<AutomationInput, String
             workspace,
             ..
         } if machine.is_empty() || agent.is_empty() || workspace.is_empty() => {
-            return Err("机器、智能体和工作目录不能为空".into());
+            return Err(ServerError::invalid_input("机器、智能体和工作目录不能为空"));
         }
         AutomationSessionOptions::NewSession {
             use_worktree: true,
             worktree_base: None,
             ..
-        } => return Err("开启 worktree 时必须指定基分支".into()),
+        } => return Err(ServerError::invalid_input("开启 worktree 时必须指定基分支")),
         AutomationSessionOptions::NewWorkflow { plan, .. } if plan.is_empty() => {
-            return Err("工作流计划不能为空".into());
+            return Err(ServerError::invalid_input("工作流计划不能为空"));
         }
         AutomationSessionOptions::NewGroup { members, .. } if members.is_empty() => {
-            return Err("群聊成员不能为空".into());
+            return Err(ServerError::invalid_input("群聊成员不能为空"));
         }
         _ => {}
     }
     match &input.trigger {
         AutomationTrigger::Schedule { cron } => {
-            Cron::from_str(cron).map_err(|error| format!("cron 表达式无效: {error}"))?;
+            Cron::from_str(cron)
+                .map_err(|error| ServerError::invalid_input(format!("cron 表达式无效: {error}")))?;
         }
         AutomationTrigger::GithubWebhook { repository, events } => {
             if repository.is_empty() {
-                return Err("GitHub 仓库不能为空".into());
+                return Err(ServerError::invalid_input("GitHub 仓库不能为空"));
             }
             if events.iter().any(|event| event.is_empty()) {
-                return Err("GitHub 事件类型不能为空".into());
+                return Err(ServerError::invalid_input("GitHub 事件类型不能为空"));
             }
         }
     }
@@ -597,33 +623,34 @@ fn normalize_session_options(options: &mut AutomationSessionOptions) {
 
 fn normalize_labels(
     labels: Vec<AutomationResultLabel>,
-) -> Result<Vec<AutomationResultLabel>, String> {
+) -> ServerResult<Vec<AutomationResultLabel>> {
     let mut normalized = Vec::new();
     for label in labels {
         let name = label.name.trim().to_string();
         let description = label.description.trim().to_string();
         if name.is_empty() || description.is_empty() {
-            return Err("结果分类的标签名和描述不能为空".into());
+            return Err(ServerError::invalid_input("结果分类的标签名和描述不能为空"));
         }
         if normalized
             .iter()
             .any(|item: &AutomationResultLabel| item.name == name)
         {
-            return Err(format!("结果分类重复: {name}"));
+            return Err(ServerError::invalid_input(format!("结果分类重复: {name}")));
         }
         normalized.push(AutomationResultLabel { name, description });
     }
     if normalized.len() < 2 {
-        return Err("结果分类至少需要两个".into());
+        return Err(ServerError::invalid_input("结果分类至少需要两个"));
     }
     Ok(normalized)
 }
 
-fn next_occurrence_ms(cron: &str, from_ms: u64) -> Result<u64, String> {
-    let cron = Cron::from_str(cron).map_err(|error| format!("cron 表达式无效: {error}"))?;
+fn next_occurrence_ms(cron: &str, from_ms: u64) -> ServerResult<u64> {
+    let cron = Cron::from_str(cron)
+        .map_err(|error| ServerError::invalid_input(format!("cron 表达式无效: {error}")))?;
     let next = cron
         .find_next_occurrence(&zoned(from_ms), false)
-        .map_err(|error| format!("计算下一次运行时间失败: {error}"))?;
+        .map_err(|error| ServerError::internal(format!("计算下一次运行时间失败: {error}")))?;
     Ok(next.timestamp().as_millisecond() as u64)
 }
 
@@ -639,7 +666,7 @@ fn session_context(
     task: &str,
     started_at: u64,
     finished_at: u64,
-) -> Result<String, String> {
+) -> ServerResult<String> {
     format_context(
         task,
         collect_history(|limit, offset| sessions.history(session_id, limit, offset)),
@@ -654,7 +681,7 @@ fn workflow_context(
     task: &str,
     started_at: u64,
     finished_at: u64,
-) -> Result<String, String> {
+) -> ServerResult<String> {
     format_context(
         task,
         collect_history(|limit, offset| workflows.history(workflow_id, limit, offset)),
@@ -669,7 +696,7 @@ fn group_context(
     task: &str,
     started_at: u64,
     finished_at: u64,
-) -> Result<String, String> {
+) -> ServerResult<String> {
     const PAGE_SIZE: usize = 100;
     let mut history = Vec::new();
     let mut offset = 0;
@@ -702,7 +729,7 @@ fn group_context(
         ));
     }
     if !has_agent_message {
-        return Err("Agent 无任何输出".into());
+        return Err(ServerError::agent("Agent 无任何输出"));
     }
     Ok(format!(
         "智能体正在执行一个自动化任务，任务内容是：{task}。\n\n以下是智能体会话消息：\n{}",
@@ -737,7 +764,7 @@ fn format_context(
     history: Vec<HistoryItem>,
     started_at: u64,
     finished_at: u64,
-) -> Result<String, String> {
+) -> ServerResult<String> {
     let mut lines = Vec::new();
     let mut has_agent_message = false;
     for item in history
@@ -755,7 +782,7 @@ fn format_context(
         }
     }
     if !has_agent_message {
-        return Err("Agent 无任何输出".into());
+        return Err(ServerError::agent("Agent 无任何输出"));
     }
     Ok(format!(
         "智能体正在执行一个自动化任务，任务内容是：{task}。\n\n以下是智能体会话消息：\n{}",
@@ -863,7 +890,7 @@ mod tests {
         *worktree_base = None;
 
         assert_eq!(
-            normalize_input(input).unwrap_err(),
+            normalize_input(input).unwrap_err().to_string(),
             "开启 worktree 时必须指定基分支"
         );
     }
@@ -942,7 +969,7 @@ mod tests {
     fn classification_context_rejects_run_without_agent_output() {
         let error =
             format_context("检查构建", vec![message("user", "开始构建", 10)], 10, 10).unwrap_err();
-        assert_eq!(error, "Agent 无任何输出");
+        assert_eq!(error.to_string(), "Agent 无任何输出");
     }
 
     #[test]

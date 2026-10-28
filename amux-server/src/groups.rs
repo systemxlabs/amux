@@ -9,6 +9,8 @@ use amux_common::api::{Group, GroupMember, GroupMemberTemplate, GroupMessage};
 use amux_common::domain::{generate_title, rand_id, ContentBlock, SessionState, StateChangeReason};
 use uuid::Uuid;
 
+use crate::db;
+use crate::error::{ServerError, ServerResult};
 use crate::sessions::{CreateSessionParams, SessionService, SessionWorktree};
 use crate::store::{self, GroupRow, MemberRow, Store};
 use crate::timestamps::now_ms;
@@ -30,7 +32,7 @@ impl GroupService {
         members: &[GroupMemberTemplate],
         title: Option<String>,
         project: Option<&str>,
-    ) -> Result<Group, String> {
+    ) -> ServerResult<Group> {
         let members: Vec<GroupMemberTemplate> = members
             .iter()
             .map(|member| GroupMemberTemplate {
@@ -52,10 +54,10 @@ impl GroupService {
         validate_members(&members)?;
         let id = Uuid::new_v4().to_string();
         let now = now_ms();
-        self.store.insert_group(&id, project, now);
+        db::blocking_sync(|| self.store.insert_group(&id, project, now));
         let title = title.unwrap_or_default();
         if !title.is_empty() {
-            self.store.set_group_title(&id, &title);
+            db::blocking_sync(|| self.store.set_group_title(&id, &title));
         }
 
         let mut created: Vec<String> = Vec::new();
@@ -86,23 +88,25 @@ impl GroupService {
                     for session in created {
                         let _ = self.sessions.delete(&session).await;
                     }
-                    self.store.delete_group(&id);
+                    db::blocking_sync(|| self.store.delete_group(&id));
                     return Err(error);
                 }
             };
-            self.store.link_group_session(&id, &session.id);
+            db::blocking_sync(|| self.store.link_group_session(&id, &session.id));
             let member_id = Uuid::new_v4().to_string();
-            self.store
-                .insert_group_member(&crate::store::GroupMemberInsert {
-                    id: &member_id,
-                    group_id: &id,
-                    machine: &template.machine,
-                    agent: &template.agent,
-                    session_id: &session.id,
-                    name: &template.name,
-                    description: &template.description,
-                    created_at: now_ms(),
-                });
+            db::blocking_sync(|| {
+                self.store
+                    .insert_group_member(&crate::store::GroupMemberInsert {
+                        id: &member_id,
+                        group_id: &id,
+                        machine: &template.machine,
+                        agent: &template.agent,
+                        session_id: &session.id,
+                        name: &template.name,
+                        description: &template.description,
+                        created_at: now_ms(),
+                    })
+            });
             created.push(session.id);
         }
         log::info!(
@@ -110,11 +114,14 @@ impl GroupService {
             members.len(),
             project.unwrap_or("")
         );
-        self.get(&id)
+        db::blocking_sync(|| self.get(&id))
     }
 
-    pub fn get(&self, id: &str) -> Result<Group, String> {
-        let row = self.store.group(id).ok_or("群聊会话不存在")?;
+    pub fn get(&self, id: &str) -> ServerResult<Group> {
+        let row = self
+            .store
+            .group(id)
+            .ok_or_else(|| ServerError::not_found("群聊会话不存在"))?;
         Ok(self.view(row))
     }
 
@@ -152,34 +159,36 @@ impl GroupService {
     }
 
     /// 用户往群聊发送指令：用户消息落盘后解析 @ 提及并驱动成员。
-    pub async fn prompt(&self, id: &str, input: Vec<ContentBlock>) -> Result<(), String> {
-        let group = self.get(id)?;
+    pub async fn prompt(&self, id: &str, input: Vec<ContentBlock>) -> ServerResult<()> {
+        let group = db::blocking_sync(|| self.get(id))?;
         if group.title.is_empty() {
             let title = generate_title(&blocks_text(&input));
             if !title.is_empty() {
-                self.store.set_group_title_if_empty(id, &title);
+                db::blocking_sync(|| self.store.set_group_title_if_empty(id, &title));
             }
         }
         let content = serde_json::to_string(&input).unwrap_or_default();
-        self.store
-            .insert_group_message(id, &rand_id(), None, None, Some(&content), now_ms());
-        self.store.touch_group(id);
+        db::blocking_sync(|| {
+            self.store
+                .insert_group_message(id, &rand_id(), None, None, Some(&content), now_ms());
+            self.store.touch_group(id);
+        });
         self.drive_mentioned(id, &input).await;
-        self.recompute_state(id);
+        db::blocking_sync(|| self.recompute_state(id));
         log::info!("群聊指令已发送: group={id}");
         Ok(())
     }
 
-    pub async fn cancel(&self, id: &str) -> Result<(), String> {
-        self.get(id)?;
+    pub async fn cancel(&self, id: &str) -> ServerResult<()> {
+        db::blocking_sync(|| self.get(id))?;
         let mut first_error = None;
-        for session_id in self.store.member_sessions(id) {
+        for session_id in db::blocking_sync(|| self.store.member_sessions(id)) {
             if let Err(error) = self.sessions.cancel(&session_id).await {
                 log::warn!("取消群聊成员会话失败: group={id} session={session_id}: {error}");
                 first_error.get_or_insert(error);
             }
         }
-        self.recompute_state(id);
+        db::blocking_sync(|| self.recompute_state(id));
         if let Some(error) = first_error {
             return Err(error);
         }
@@ -193,8 +202,10 @@ impl GroupService {
         title: String,
         project: Option<String>,
         pinned: bool,
-    ) -> Result<(), String> {
-        self.store.group(id).ok_or("群聊会话不存在")?;
+    ) -> ServerResult<()> {
+        self.store
+            .group(id)
+            .ok_or_else(|| ServerError::not_found("群聊会话不存在"))?;
         if !title.is_empty() {
             self.store.set_group_title(id, &title);
         }
@@ -205,8 +216,10 @@ impl GroupService {
     }
 
     /// 标记群聊会话及其成员普通会话已读（docs/DESIGN.md「会话交互视图」）。
-    pub fn read(&self, id: &str) -> Result<(), String> {
-        self.store.group(id).ok_or("群聊会话不存在")?;
+    pub fn read(&self, id: &str) -> ServerResult<()> {
+        self.store
+            .group(id)
+            .ok_or_else(|| ServerError::not_found("群聊会话不存在"))?;
         self.store.set_group_unread(id, false);
         for session_id in self.store.member_sessions(id) {
             self.store.set_session_unread(&session_id, false);
@@ -215,10 +228,14 @@ impl GroupService {
     }
 
     /// 删除群聊会话：级联删除成员普通会话。
-    pub async fn delete(&self, id: &str) -> Result<(), String> {
-        self.store.group(id).ok_or("群聊会话不存在")?;
-        let sessions = self.store.member_sessions(id);
-        self.store.delete_group(id);
+    pub async fn delete(&self, id: &str) -> ServerResult<()> {
+        db::blocking_sync(|| {
+            self.store
+                .group(id)
+                .ok_or_else(|| ServerError::not_found("群聊会话不存在"))
+        })?;
+        let sessions = db::blocking_sync(|| self.store.member_sessions(id));
+        db::blocking_sync(|| self.store.delete_group(id));
         for session_id in sessions {
             let _ = self.sessions.delete(&session_id).await;
         }
@@ -258,20 +275,23 @@ impl GroupService {
 
     /// 成员普通会话进入空闲：解析自上次用户消息以来 agent 消息中的 @ 提及。
     pub async fn on_member_idle(&self, session_id: &str, reason: StateChangeReason) {
-        let Some(member) = self.store.group_member_by_session(session_id) else {
+        let Some(member) = db::blocking_sync(|| self.store.group_member_by_session(session_id))
+        else {
             return;
         };
-        self.recompute_state(&member.group_id);
+        db::blocking_sync(|| self.recompute_state(&member.group_id));
         if matches!(
             reason,
             StateChangeReason::Cancelled | StateChangeReason::Aborted
         ) {
             return;
         }
-        let since = self
-            .store
-            .last_user_message_at(session_id, member.created_at);
-        let mentions = self.mentions_in_messages(&member.group_id, since);
+        let mentions = db::blocking_sync(|| {
+            let since = self
+                .store
+                .last_user_message_at(session_id, member.created_at);
+            self.mentions_in_messages(&member.group_id, since)
+        });
         for member_id in mentions {
             self.drive_member(&member_id).await;
         }
@@ -303,7 +323,7 @@ impl GroupService {
     /// 解析用户消息中的 @ 提及并驱动对应成员。
     async fn drive_mentioned(&self, group_id: &str, content: &[ContentBlock]) {
         let text = blocks_text(content);
-        let members = self.store.group_members(group_id);
+        let members = db::blocking_sync(|| self.store.group_members(group_id));
         for member_id in mentioned_members(&text, &members, None) {
             self.drive_member(&member_id).await;
         }
@@ -345,27 +365,33 @@ impl GroupService {
 
     /// 驱动一个成员普通会话：以用户角色发送群聊未读消息与行为准则。
     async fn drive_member(&self, member_id: &str) {
-        let Some(member) = self.store.group_member(member_id) else {
+        let Some((group_id, session_id, member_name, prompt)) = db::blocking_sync(|| {
+            let member = self.store.group_member(member_id)?;
+            let group = self.store.group(&member.group_id)?;
+            let members = self.store.group_members(&group.id);
+            let since = self
+                .store
+                .last_user_message_at(&member.session_id, member.created_at);
+            let unread = self
+                .store
+                .group_messages_since(&group.id, since)
+                .into_iter()
+                .filter_map(|row| self.unread_message(&row))
+                .collect::<Vec<_>>();
+            let prompt = drive_prompt(&member, &members, &unread);
+            Some((
+                group.id.clone(),
+                member.session_id.clone(),
+                member.name.clone(),
+                prompt,
+            ))
+        }) else {
             return;
         };
-        let Some(group) = self.store.group(&member.group_id) else {
-            return;
-        };
-        let members = self.store.group_members(&group.id);
-        let since = self
-            .store
-            .last_user_message_at(&member.session_id, member.created_at);
-        let unread = self
-            .store
-            .group_messages_since(&group.id, since)
-            .into_iter()
-            .filter_map(|row| self.unread_message(&row))
-            .collect::<Vec<_>>();
-        let prompt = drive_prompt(&member, &members, &unread);
         match self
             .sessions
             .prompt(
-                &member.session_id,
+                &session_id,
                 vec![ContentBlock::Text(TextContent::new(prompt))],
             )
             .await
@@ -373,21 +399,16 @@ impl GroupService {
             Ok(()) => {
                 // ACP 的 busy 事件晚于 prompt 响应到达；先落状态，避免群聊在两者之间
                 // 被重算为空闲并提前触发自动化完成。
-                self.store.set_state(&member.session_id, SessionState::Busy);
-                self.recompute_state(&group.id);
+                db::blocking_sync(|| {
+                    self.store.set_state(&session_id, SessionState::Busy);
+                    self.recompute_state(&group_id);
+                });
                 log::info!(
-                    "群聊成员已驱动: group={} member={} name={} session={}",
-                    group.id,
-                    member.id,
-                    member.name,
-                    member.session_id
+                    "群聊成员已驱动: group={group_id} member={member_id} name={member_name} session={session_id}"
                 );
             }
             Err(error) => log::warn!(
-                "群聊成员驱动失败: group={} member={} session={}: {error}",
-                group.id,
-                member.id,
-                member.session_id
+                "群聊成员驱动失败: group={group_id} member={member_id} session={session_id}: {error}"
             ),
         }
     }
@@ -436,9 +457,9 @@ fn member_view(member: MemberRow) -> GroupMember {
     }
 }
 
-fn validate_members(members: &[GroupMemberTemplate]) -> Result<(), String> {
+fn validate_members(members: &[GroupMemberTemplate]) -> ServerResult<()> {
     if members.is_empty() {
-        return Err("群聊成员不能为空".into());
+        return Err(ServerError::invalid_input("群聊成员不能为空"));
     }
     let mut names = HashSet::new();
     for member in members {
@@ -448,16 +469,21 @@ fn validate_members(members: &[GroupMemberTemplate]) -> Result<(), String> {
             || member.agent.trim().is_empty()
             || member.workspace.trim().is_empty()
         {
-            return Err("群聊成员的名称、角色描述、机器、agent 和工作目录不能为空".into());
+            return Err(ServerError::invalid_input(
+                "群聊成员的名称、角色描述、机器、agent 和工作目录不能为空",
+            ));
         }
         if matches!(member.name.as_str(), "all" | "user") {
-            return Err("群聊成员名称不能为 all 或 user".into());
+            return Err(ServerError::invalid_input("群聊成员名称不能为 all 或 user"));
         }
         if !names.insert(member.name.trim()) {
-            return Err(format!("群聊成员名称重复: {}", member.name));
+            return Err(ServerError::invalid_input(format!(
+                "群聊成员名称重复: {}",
+                member.name
+            )));
         }
         if member.use_worktree && member.worktree_base.is_none() {
-            return Err("开启 worktree 时必须指定基分支".into());
+            return Err(ServerError::invalid_input("开启 worktree 时必须指定基分支"));
         }
     }
     Ok(())

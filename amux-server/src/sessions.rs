@@ -25,6 +25,8 @@ use agent_client_protocol::schema::MaybeUndefined;
 
 use crate::acp::{AcpEvent, AgentConnection, CompactionPatch, MessageUpdate, ThinkingUpdate};
 use crate::config_store::ConfigStore;
+use crate::db;
+use crate::error::{ServerError, ServerResult};
 use crate::machines::MachineHub;
 use crate::store::Store;
 use crate::terminals::{TerminalCache, TerminalSubscription, IDLE_EXPIRE_MS};
@@ -89,11 +91,11 @@ pub enum SessionWorktree<'a> {
 
 impl<'a> SessionWorktree<'a> {
     /// 归一化外部输入：开启 worktree 时必须给出基分支。
-    pub fn new(use_worktree: bool, base: Option<&'a WorktreeBase>) -> Result<Self, String> {
+    pub fn new(use_worktree: bool, base: Option<&'a WorktreeBase>) -> ServerResult<Self> {
         match (use_worktree, base) {
             (false, _) => Ok(Self::Disabled),
             (true, Some(base)) => Ok(Self::Base(base)),
-            (true, None) => Err("开启 worktree 时必须指定基分支".to_string()),
+            (true, None) => Err(ServerError::invalid_input("开启 worktree 时必须指定基分支")),
         }
     }
 }
@@ -125,10 +127,10 @@ impl SessionService {
         }
     }
 
-    pub fn get(&self, id: &str) -> Result<Session, String> {
+    pub fn get(&self, id: &str) -> ServerResult<Session> {
         self.store
             .session(id)
-            .ok_or_else(|| "会话不存在".to_string())
+            .ok_or_else(|| ServerError::not_found("会话不存在"))
     }
 
     /// 会话列表分页：非关联普通会话（`GET /sessions`）；`project` 指定时只返回该项目会话。
@@ -159,7 +161,7 @@ impl SessionService {
     /// 不再校验 agent 是否可用：新建会话视图只允许选择已发现的可用 agent，真正不可用
     /// 时会在发送指令时暴露。落库与最近工作目录记录都是阻塞 I/O，放到阻塞线程池执行，
     /// 不占用 async 执行器；仍在响应前完成，保证返回的会话立即可读。
-    pub async fn create(&self, request: CreateSessionParams<'_>) -> Result<Session, String> {
+    pub async fn create(&self, request: CreateSessionParams<'_>) -> ServerResult<Session> {
         let CreateSessionParams {
             machine,
             agent,
@@ -219,7 +221,7 @@ impl SessionService {
             stored
         })
         .await
-        .map_err(|error| format!("写入会话任务失败: {error}"))??;
+        .map_err(|error| ServerError::internal(format!("写入会话任务失败: {error}")))??;
         log::info!(
             "会话已创建: session={} machine={} agent={}",
             session.id,
@@ -230,19 +232,18 @@ impl SessionService {
     }
 
     /// 发送指令：惰性创建/恢复 agent 会话，prompt 受理后立即落盘用户消息。
-    pub async fn prompt(&self, id: &str, input: Vec<ContentBlock>) -> Result<(), String> {
-        let session = self.get(id)?;
+    pub async fn prompt(&self, id: &str, input: Vec<ContentBlock>) -> ServerResult<()> {
+        let session = db::blocking_sync(|| self.get(id))?;
         self.ensure_agent_session(&session).await?;
-        let agent_session_id = self
-            .agent_session_id(id)
-            .ok_or_else(|| "agent 会话未就绪".to_string())?;
+        let agent_session_id = db::blocking_sync(|| self.agent_session_id(id))
+            .ok_or_else(|| ServerError::internal("agent 会话未就绪"))?;
         let conn = self.machines.acp(&session.machine, &session.agent).await?;
-        let message_id = conn.prompt(&agent_session_id, input.clone()).await?;
+        let message_id = conn
+            .prompt(&session.id, &agent_session_id, input.clone())
+            .await?;
 
         // prompt 已受理：用户消息立即落盘（忽略 Agent 回放的 user_message*）
         let content = serde_json::to_string(&input).unwrap_or_default();
-        self.store
-            .upsert_message(id, &message_id, "user", &content, now_ms());
         let text: String = input
             .iter()
             .filter_map(|block| match block {
@@ -250,10 +251,14 @@ impl SessionService {
                 _ => None,
             })
             .collect();
-        if !text.is_empty() {
-            self.store.set_title_if_empty(id, &generate_title(&text));
-        }
-        self.store.touch(id);
+        db::blocking_sync(|| {
+            self.store
+                .upsert_message(id, &message_id, "user", &content, now_ms());
+            if !text.is_empty() {
+                self.store.set_title_if_empty(id, &generate_title(&text));
+            }
+            self.store.touch(id);
+        });
         log::info!(
             "会话指令已发送: session={id} machine={} agent={} agent_session={agent_session_id}",
             session.machine,
@@ -263,13 +268,13 @@ impl SessionService {
     }
 
     /// 取消：仅当会话正在工作中（空闲会话不触达 Agent）。
-    pub async fn cancel(&self, id: &str) -> Result<(), String> {
-        let session = self.get(id)?;
+    pub async fn cancel(&self, id: &str) -> ServerResult<()> {
+        let session = db::blocking_sync(|| self.get(id))?;
         if session.state == SessionState::Idle {
             log::info!("忽略取消请求，会话已空闲: session={id}");
             return Ok(());
         }
-        let Some(agent_session_id) = self.agent_session_id(id) else {
+        let Some(agent_session_id) = db::blocking_sync(|| self.agent_session_id(id)) else {
             log::info!("忽略取消请求，agent 会话未就绪: session={id}");
             return Ok(());
         };
@@ -290,29 +295,35 @@ impl SessionService {
         config: Option<SessionConfigSetting>,
         project: Option<String>,
         pinned: bool,
-    ) -> Result<(), String> {
-        let session = self.get(id)?;
-        if !title.is_empty() {
-            self.store.set_title(id, &title);
-        }
-        self.store.set_session_project(id, project.as_deref());
-        self.store.set_session_pinned(id, pinned);
+    ) -> ServerResult<()> {
+        let session = db::blocking_sync(|| self.get(id))?;
+        db::blocking_sync(|| {
+            if !title.is_empty() {
+                self.store.set_title(id, &title);
+            }
+            self.store.set_session_project(id, project.as_deref());
+            self.store.set_session_pinned(id, pinned);
+        });
         let has_config = config.is_some();
         if let Some(config) = config {
             self.ensure_agent_session(&session).await?;
-            let agent_session_id = self
-                .agent_session_id(id)
-                .ok_or_else(|| "agent 会话未就绪".to_string())?;
+            let agent_session_id = db::blocking_sync(|| self.agent_session_id(id))
+                .ok_or_else(|| ServerError::internal("agent 会话未就绪"))?;
             let conn = self.machines.acp(&session.machine, &session.agent).await?;
             let updates_model = self
                 .model_config_id(id)
                 .is_some_and(|config_id| config_id == config.config_id);
             let options = conn
-                .set_config_option(&agent_session_id, &config.config_id, config.value)
+                .set_config_option(
+                    &session.id,
+                    &agent_session_id,
+                    &config.config_id,
+                    config.value,
+                )
                 .await?;
             if updates_model {
                 if let Some(model) = model_value(&options) {
-                    self.store.set_session_model(id, &model);
+                    db::blocking_sync(|| self.store.set_session_model(id, &model));
                 }
             }
             self.caches.options.lock().insert(id.to_string(), options);
@@ -327,17 +338,17 @@ impl SessionService {
     }
 
     /// 标记会话已读（docs/DESIGN.md「会话交互视图」）。
-    pub fn read(&self, id: &str) -> Result<(), String> {
+    pub fn read(&self, id: &str) -> ServerResult<()> {
         self.get(id)?;
         self.store.set_session_unread(id, false);
         Ok(())
     }
 
     /// 删除：元数据立即删除，资源清理异步尽力而为。
-    pub async fn delete(&self, id: &str) -> Result<(), String> {
-        let session = self.get(id)?;
-        let agent_session_id = self.agent_session_id(id);
-        self.store.delete_session(id);
+    pub async fn delete(&self, id: &str) -> ServerResult<()> {
+        let session = db::blocking_sync(|| self.get(id))?;
+        let agent_session_id = db::blocking_sync(|| self.agent_session_id(id));
+        db::blocking_sync(|| self.store.delete_session(id));
         self.caches.forget(id);
 
         let terminals = self.terminals.remove_session(id);
@@ -356,12 +367,12 @@ impl SessionService {
             }
             if let Some(agent_session_id) = agent_session_id {
                 if let Ok(conn) = machines.acp(&machine, &agent).await {
-                    if let Err(error) = conn.close(&agent_session_id).await {
+                    if let Err(error) = conn.close(Some(&session_id), &agent_session_id).await {
                         log::warn!(
                             "session/close 失败: session={session_id} agent_session={agent_session_id}: {error}"
                         );
                     }
-                    let _ = conn.delete(&agent_session_id).await;
+                    let _ = conn.delete(&session_id, &agent_session_id).await;
                 }
             }
             if !worktree_dir.is_empty() {
@@ -377,8 +388,8 @@ impl SessionService {
         Ok(())
     }
 
-    pub async fn config_options(&self, id: &str) -> Result<Vec<SessionConfigOption>, String> {
-        let session = self.get(id)?;
+    pub async fn config_options(&self, id: &str) -> ServerResult<Vec<SessionConfigOption>> {
+        let session = db::blocking_sync(|| self.get(id))?;
         self.ensure_agent_session(&session).await?;
         Ok(self
             .caches
@@ -437,8 +448,8 @@ impl SessionService {
         &self,
         id: &str,
         base: &str,
-    ) -> Result<amux_common::domain::GitDiffResult, String> {
-        let session = self.get(id)?;
+    ) -> ServerResult<amux_common::domain::GitDiffResult> {
+        let session = db::blocking_sync(|| self.get(id))?;
         self.machines
             .git_diff(&session.machine, &self.exec_dir(&session), base)
             .await
@@ -452,8 +463,8 @@ impl SessionService {
         cwd: Option<String>,
         cols: u16,
         rows: u16,
-    ) -> Result<String, String> {
-        let session = self.get(id)?;
+    ) -> ServerResult<String> {
+        let session = db::blocking_sync(|| self.get(id))?;
         let cwd = cwd.unwrap_or_else(|| self.exec_dir(&session));
         let terminal_id = self
             .machines
@@ -482,8 +493,8 @@ impl SessionService {
         id: &str,
         terminal_id: &str,
         data: String,
-    ) -> Result<(), String> {
-        let machine = self.terminal_machine(id, terminal_id)?;
+    ) -> ServerResult<()> {
+        let machine = db::blocking_sync(|| self.terminal_machine(id, terminal_id))?;
         self.terminals.touch(terminal_id);
         self.machines
             .terminal_input(
@@ -502,8 +513,8 @@ impl SessionService {
         terminal_id: &str,
         cols: u16,
         rows: u16,
-    ) -> Result<(), String> {
-        let machine = self.terminal_machine(id, terminal_id)?;
+    ) -> ServerResult<()> {
+        let machine = db::blocking_sync(|| self.terminal_machine(id, terminal_id))?;
         self.terminals.resize(terminal_id, cols, rows);
         self.machines
             .terminal_resize(
@@ -521,17 +532,17 @@ impl SessionService {
         self.terminals.subscribe(terminal_id)
     }
 
-    pub async fn terminal_close(&self, id: &str, terminal_id: &str) -> Result<(), String> {
-        let machine = self.terminal_machine(id, terminal_id)?;
+    pub async fn terminal_close(&self, id: &str, terminal_id: &str) -> ServerResult<()> {
+        let machine = db::blocking_sync(|| self.terminal_machine(id, terminal_id))?;
         self.terminals.remove(terminal_id);
         self.machines.terminal_close(&machine, terminal_id).await;
         log::info!("终端已关闭: session={id} terminal={terminal_id}");
         Ok(())
     }
 
-    fn terminal_machine(&self, id: &str, terminal_id: &str) -> Result<String, String> {
+    fn terminal_machine(&self, id: &str, terminal_id: &str) -> ServerResult<String> {
         if !self.terminals.contains(terminal_id) {
-            return Err("终端不存在".to_string());
+            return Err(ServerError::not_found("终端不存在"));
         }
         Ok(self.get(id)?.machine)
     }
@@ -548,25 +559,25 @@ impl SessionService {
     }
 
     /// 惰性创建/恢复 agent 侧会话；resume 失败时记录错误并返回。
-    pub async fn ensure_agent_session(&self, session: &Session) -> Result<(), String> {
+    pub async fn ensure_agent_session(&self, session: &Session) -> ServerResult<()> {
         let cwd = self.exec_dir(session);
         let conn = self.machines.acp(&session.machine, &session.agent).await?;
         let resumed = self.caches.resumed.lock().contains(&session.id);
-        match self.store.agent_session_id(&session.id) {
+        match db::blocking_sync(|| self.store.agent_session_id(&session.id)) {
             None => {
-                let (agent_session_id, options) = conn.new_session(&cwd).await?;
+                let (agent_session_id, options) = conn.new_session(&session.id, &cwd).await?;
                 let options = self
                     .apply_model_preference(&conn, session, &agent_session_id, options)
                     .await;
-                if !self
-                    .store
-                    .claim_agent_session_id(&session.id, &agent_session_id)
-                {
+                if !db::blocking_sync(|| {
+                    self.store
+                        .claim_agent_session_id(&session.id, &agent_session_id)
+                }) {
                     log::info!(
                         "丢弃并发创建的 ACP 会话: session={} agent_session={agent_session_id}",
                         session.id
                     );
-                    if let Err(error) = conn.close(&agent_session_id).await {
+                    if let Err(error) = conn.close(Some(&session.id), &agent_session_id).await {
                         log::warn!(
                             "关闭多余 ACP 会话失败: session={} agent_session={agent_session_id}: {error}",
                             session.id
@@ -594,7 +605,10 @@ impl SessionService {
                 if resumed {
                     return Ok(());
                 }
-                match conn.resume_session(&agent_session_id, &cwd).await {
+                match conn
+                    .resume_session(&session.id, &agent_session_id, &cwd)
+                    .await
+                {
                     Ok(options) => {
                         let options = self
                             .apply_model_preference(&conn, session, &agent_session_id, options)
@@ -620,8 +634,10 @@ impl SessionService {
                             "session/resume 失败: session={} agent_session={agent_session_id}: {error}",
                             session.id
                         );
-                        self.record_error(&session.id, &format!("会话恢复失败: {error}"));
-                        return Err(format!("会话恢复失败: {error}"));
+                        db::blocking_sync(|| {
+                            self.record_error(&session.id, &format!("会话恢复失败: {error}"))
+                        });
+                        return Err(error.prefixed("会话恢复失败"));
                     }
                 }
             }
@@ -661,6 +677,7 @@ impl SessionService {
         let config_id = model_config_id(&options).unwrap_or("model");
         match conn
             .set_config_option(
+                &session.id,
                 agent_session_id,
                 config_id,
                 SessionConfigOptionValue::ValueId {
@@ -681,7 +698,9 @@ impl SessionService {
                     "普通会话模型偏好设置失败: session={} agent_session={agent_session_id} model={model}: {error}",
                     session.id
                 );
-                self.record_error(&session.id, &format!("设置模型偏好失败: {error}"));
+                db::blocking_sync(|| {
+                    self.record_error(&session.id, &format!("设置模型偏好失败: {error}"))
+                });
                 options
             }
         }
@@ -950,18 +969,19 @@ impl SessionService {
     /// 后台维护：关闭长时间无活动的 agent 会话、删除长期无输入输出的终端。
     pub async fn maintain(&self) {
         let now = now_ms();
-        for session in self.store.sessions_all() {
+        let sessions = db::blocking_sync(|| self.store.sessions_all());
+        for session in sessions {
             // 从未有活动的会话以创建时间为基准，避免会话刚建好就被关闭
-            let last_activity = self
-                .store
-                .last_activity_at(&session.id)
+            let last_activity = db::blocking_sync(|| self.store.last_activity_at(&session.id))
                 .unwrap_or(session.created_at);
             let resumed = self.caches.resumed.lock().contains(&session.id);
             if should_close_idle_agent_session(idle_expired(&session, last_activity, now), resumed)
             {
-                if let Some(agent_session_id) = self.store.agent_session_id(&session.id) {
+                if let Some(agent_session_id) =
+                    db::blocking_sync(|| self.store.agent_session_id(&session.id))
+                {
                     if let Ok(conn) = self.machines.acp(&session.machine, &session.agent).await {
-                        if let Err(error) = conn.close(&agent_session_id).await {
+                        if let Err(error) = conn.close(Some(&session.id), &agent_session_id).await {
                             log::warn!(
                                 "session/close 失败: session={} agent_session={agent_session_id}: {error}",
                                 session.id
@@ -978,7 +998,7 @@ impl SessionService {
         }
         // 终端超过 1 天没有输入输出即删除，并通知机器关闭对应 PTY（docs/DESIGN.md「终端存储」）
         for (session_id, terminal_id) in self.terminals.sweep_idle(now, IDLE_EXPIRE_MS) {
-            if let Ok(session) = self.get(&session_id) {
+            if let Ok(session) = db::blocking_sync(|| self.get(&session_id)) {
                 self.machines
                     .terminal_close(&session.machine, &terminal_id)
                     .await;

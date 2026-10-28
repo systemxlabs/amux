@@ -30,6 +30,8 @@ use rig_core::completion::{Message, ToolDefinition};
 use uuid::Uuid;
 
 use crate::config_store::ConfigStore;
+use crate::db;
+use crate::error::{ServerError, ServerResult};
 use crate::machines::MachineHub;
 use crate::orchestrator;
 use crate::sessions::{SessionService, SessionWorktree};
@@ -93,23 +95,28 @@ impl WorkflowService {
         plan: &str,
         title: Option<String>,
         project: Option<&str>,
-    ) -> Result<Workflow, String> {
+    ) -> ServerResult<Workflow> {
         let id = Uuid::new_v4().to_string();
         let title = title.unwrap_or_default();
-        self.store.insert_workflow(crate::store::WorkflowInsert {
-            id: &id,
-            title: &title,
-            state: SessionState::Idle,
-            plan,
-            project,
-            created_at: now_ms(),
+        db::blocking_sync(|| {
+            self.store.insert_workflow(crate::store::WorkflowInsert {
+                id: &id,
+                title: &title,
+                state: SessionState::Idle,
+                plan,
+                project,
+                created_at: now_ms(),
+            })
         });
         log::info!("工作流会话已创建: workflow={id}");
-        self.get(&id)
+        db::blocking_sync(|| self.get(&id))
     }
 
-    pub fn get(&self, id: &str) -> Result<Workflow, String> {
-        let row = self.store.workflow(id).ok_or("工作流不存在")?;
+    pub fn get(&self, id: &str) -> ServerResult<Workflow> {
+        let row = self
+            .store
+            .workflow(id)
+            .ok_or_else(|| ServerError::not_found("工作流不存在"))?;
         Ok(Workflow {
             id: row.id.clone(),
             title: row.title,
@@ -159,16 +166,12 @@ impl WorkflowService {
     }
 
     /// 用户消息：工作中以 steer 注入，否则新起一轮调度。
-    pub async fn prompt(
-        self: &Arc<Self>,
-        id: &str,
-        input: Vec<ContentBlock>,
-    ) -> Result<(), String> {
-        let workflow = self.get(id)?;
+    pub async fn prompt(self: &Arc<Self>, id: &str, input: Vec<ContentBlock>) -> ServerResult<()> {
+        let workflow = db::blocking_sync(|| self.get(id))?;
         if workflow.title.is_empty() {
             let title = generate_title(&blocks_text(&input));
             if !title.is_empty() {
-                self.store.set_workflow_title_if_empty(id, &title);
+                db::blocking_sync(|| self.store.set_workflow_title_if_empty(id, &title));
             }
         }
         self.push_user(id, input);
@@ -187,8 +190,10 @@ impl WorkflowService {
         title: String,
         project: Option<String>,
         pinned: bool,
-    ) -> Result<(), String> {
-        self.store.workflow(id).ok_or("工作流不存在")?;
+    ) -> ServerResult<()> {
+        self.store
+            .workflow(id)
+            .ok_or_else(|| ServerError::not_found("工作流不存在"))?;
         if !title.is_empty() {
             self.store.set_workflow_title(id, &title);
         }
@@ -199,8 +204,10 @@ impl WorkflowService {
     }
 
     /// 标记工作流会话及其关联普通会话已读（docs/DESIGN.md「会话交互视图」）。
-    pub fn read(&self, id: &str) -> Result<(), String> {
-        self.store.workflow(id).ok_or("工作流不存在")?;
+    pub fn read(&self, id: &str) -> ServerResult<()> {
+        self.store
+            .workflow(id)
+            .ok_or_else(|| ServerError::not_found("工作流不存在"))?;
         self.store.set_workflow_unread(id, false);
         for session_id in self.store.linked_sessions(id) {
             self.store.set_session_unread(&session_id, false);
@@ -209,15 +216,20 @@ impl WorkflowService {
     }
 
     /// 删除工作流会话：连同其关联普通会话一并删除。
-    pub async fn delete(&self, id: &str) -> Result<(), String> {
-        self.store.workflow(id).ok_or("工作流不存在")?;
-        let linked = self.store.linked_sessions(id);
-        self.store.delete_workflow(id);
+    pub async fn delete(&self, id: &str) -> ServerResult<()> {
+        db::blocking_sync(|| {
+            self.store
+                .workflow(id)
+                .ok_or_else(|| ServerError::not_found("工作流不存在"))
+        })?;
+        let linked = db::blocking_sync(|| self.store.linked_sessions(id));
+        db::blocking_sync(|| self.store.delete_workflow(id));
         self.runs.lock().remove(id);
         for session_id in linked {
             let _ = self.sessions.delete(&session_id).await;
         }
-        let _ = std::fs::remove_file(self.transcript_path(id));
+        let path = self.transcript_path(id);
+        let _ = db::blocking_sync(|| std::fs::remove_file(path));
         log::info!("工作流会话已删除: workflow={id}");
         Ok(())
     }
@@ -371,33 +383,35 @@ impl WorkflowService {
             }
             state.running = true;
         }
-        self.store
-            .set_workflow_state(workflow_id, SessionState::Busy);
+        db::blocking_sync(|| {
+            self.store
+                .set_workflow_state(workflow_id, SessionState::Busy)
+        });
 
         let result = self.drive(workflow_id).await;
         match result {
             Ok(text) => {
                 if !text.trim().is_empty() {
-                    self.append(
-                        workflow_id,
-                        &TranscriptLine::Agent {
-                            content: vec![ContentBlock::Text(TextContent::new(text))],
-                            timestamp: now_ms(),
-                        },
-                    );
-                    self.store.set_workflow_unread(workflow_id, true);
+                    db::blocking_sync(|| {
+                        self.append(
+                            workflow_id,
+                            &TranscriptLine::Agent {
+                                content: vec![ContentBlock::Text(TextContent::new(text))],
+                                timestamp: now_ms(),
+                            },
+                        );
+                        self.store.set_workflow_unread(workflow_id, true);
+                    });
                 }
             }
             Err(error) => {
                 log::warn!("工作流智能体运行失败: workflow={workflow_id}: {error}");
-                self.record_activity(
-                    workflow_id,
-                    &Activity::Error {
-                        id: format!("err-{}", Uuid::new_v4()),
-                        timestamp: now_ms(),
-                        error: error.clone(),
-                    },
-                );
+                let activity = Activity::Error {
+                    id: format!("err-{}", Uuid::new_v4()),
+                    timestamp: now_ms(),
+                    error: error.to_string(),
+                };
+                db::blocking_sync(|| self.record_activity(workflow_id, &activity));
             }
         }
 
@@ -408,19 +422,16 @@ impl WorkflowService {
                 state.ongoing = None;
             }
         }
-        self.recompute_state(workflow_id);
+        db::blocking_sync(|| self.recompute_state(workflow_id));
     }
 
     /// 驱动一轮：每次请求前注入 steer；一轮结束后仍有 steer 则继续。
-    async fn drive(self: &Arc<Self>, workflow_id: &str) -> Result<String, String> {
+    async fn drive(self: &Arc<Self>, workflow_id: &str) -> ServerResult<String> {
         let config = self
             .config
             .orchestrator()
-            .ok_or("工作流智能体未配置".to_string())?;
-        let plan = self
-            .store
-            .workflow(workflow_id)
-            .map(|row| row.plan)
+            .ok_or_else(|| ServerError::invalid_input("工作流智能体未配置"))?;
+        let plan = db::blocking_sync(|| self.store.workflow(workflow_id).map(|row| row.plan))
             .unwrap_or_default();
         let tools = Arc::new(WorkflowTools {
             service: Arc::clone(self),
@@ -447,7 +458,8 @@ impl WorkflowService {
                     injected: Mutex::new(Vec::new()),
                 },
             )
-            .await?;
+            .await
+            .map_err(ServerError::agent)?;
             output.push_str(&text);
             let steers = {
                 let mut runs = self.runs.lock();
@@ -863,7 +875,7 @@ impl WorkflowTools {
             .collect()
     }
 
-    async fn call(&self, name: &str, arguments: serde_json::Value) -> Result<String, String> {
+    async fn call(&self, name: &str, arguments: serde_json::Value) -> ServerResult<String> {
         let services = &self.service;
         match name {
             "list_agents" => {
@@ -894,7 +906,7 @@ impl WorkflowTools {
                 })
             }
             "list_sessions" => {
-                let sessions = services.linked_sessions(&self.workflow_id);
+                let sessions = db::blocking_sync(|| services.linked_sessions(&self.workflow_id));
                 if sessions.is_empty() {
                     return Ok("本工作流暂无关联普通会话".to_string());
                 }
@@ -960,7 +972,7 @@ impl WorkflowTools {
                         project: None,
                     })
                     .await?;
-                services.link_session(&self.workflow_id, &session.id);
+                db::blocking_sync(|| services.link_session(&self.workflow_id, &session.id));
                 log::info!(
                     "工作流已创建关联会话: workflow={} session={} machine={} agent={}",
                     self.workflow_id,
@@ -1006,7 +1018,7 @@ impl WorkflowTools {
             "configure_session" => {
                 let session_id = string_arg(&arguments, "session")?;
                 self.require_linked(&session_id)?;
-                let session = services.sessions.get(&session_id)?;
+                let session = db::blocking_sync(|| services.sessions.get(&session_id))?;
                 let title = arguments
                     .get("title")
                     .and_then(|value| value.as_str())
@@ -1033,25 +1045,29 @@ impl WorkflowTools {
                 let session_id = string_arg(&arguments, "session")?;
                 self.require_linked(&session_id)?;
                 let (limit, offset) = page_arg(&arguments);
-                let (items, _) = services.sessions.history(&session_id, limit, offset);
+                let (items, _) =
+                    db::blocking_sync(|| services.sessions.history(&session_id, limit, offset));
                 Ok(serde_json::to_string(&items).unwrap_or_default())
             }
             "read_session_activities" => {
                 let session_id = string_arg(&arguments, "session")?;
                 self.require_linked(&session_id)?;
                 let (limit, offset) = page_arg(&arguments);
-                let (activities, _) = services.sessions.activities(&session_id, limit, offset);
+                let (activities, _) =
+                    db::blocking_sync(|| services.sessions.activities(&session_id, limit, offset));
                 Ok(serde_json::to_string(&activities).unwrap_or_default())
             }
-            other => Err(format!("未知工具: {other}")),
+            other => Err(ServerError::invalid_input(format!("未知工具: {other}"))),
         }
     }
 
-    fn require_linked(&self, session_id: &str) -> Result<(), String> {
-        if self.service.is_linked(&self.workflow_id, session_id) {
+    fn require_linked(&self, session_id: &str) -> ServerResult<()> {
+        if db::blocking_sync(|| self.service.is_linked(&self.workflow_id, session_id)) {
             Ok(())
         } else {
-            Err(format!("{session_id} 不是本工作流的关联普通会话"))
+            Err(ServerError::invalid_input(format!(
+                "{session_id} 不是本工作流的关联普通会话"
+            )))
         }
     }
 }
@@ -1061,18 +1077,18 @@ async fn resolve_worktree_base(
     machine: &str,
     cwd: &str,
     requested: Option<&str>,
-) -> Result<WorktreeBase, String> {
+) -> ServerResult<WorktreeBase> {
     let requested = requested
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .ok_or("开启 worktree 时必须指定基分支")?;
+        .ok_or_else(|| ServerError::invalid_input("开启 worktree 时必须指定基分支"))?;
     let branches = machines.git_branches(machine, cwd).await?;
     let branch = branches
         .branches
         .into_iter()
         .find(|branch| branch.full_name == requested)
-        .ok_or_else(|| format!("worktree 基分支不存在: {requested}"))?;
-    WorktreeBase::parse(branch.full_name)
+        .ok_or_else(|| ServerError::not_found(format!("worktree 基分支不存在: {requested}")))?;
+    WorktreeBase::parse(branch.full_name).map_err(ServerError::invalid_input)
 }
 
 /// 工具调用的参数（transcript 中以 JSON 字符串存放）转回 JSON 值。
@@ -1080,12 +1096,12 @@ fn parse_arguments(parameters: &str) -> serde_json::Value {
     serde_json::from_str(parameters).unwrap_or_default()
 }
 
-fn string_arg(arguments: &serde_json::Value, key: &str) -> Result<String, String> {
+fn string_arg(arguments: &serde_json::Value, key: &str) -> ServerResult<String> {
     arguments
         .get(key)
         .and_then(|value| value.as_str())
         .map(str::to_string)
-        .ok_or_else(|| format!("缺少参数 {key}"))
+        .ok_or_else(|| ServerError::invalid_input(format!("缺少参数 {key}")))
 }
 
 /// 分页参数（默认 limit = PAGE_LIMIT，offset = 0）。
@@ -1325,7 +1341,7 @@ impl From<&Activity> for TranscriptLine {
                 timestamp, error, ..
             } => TranscriptLine::Error {
                 timestamp: *timestamp,
-                error: error.clone(),
+                error: error.to_string(),
             },
         }
     }
@@ -1531,7 +1547,7 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-            assert!(error.contains("基分支"), "{error}");
+            assert!(error.to_string().contains("基分支"), "{error}");
         }
 
         let output = tools

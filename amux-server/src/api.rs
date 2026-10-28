@@ -20,10 +20,12 @@ use serde::Deserialize;
 use sha2::Sha256;
 
 use crate::attachments::{AttachmentOwner, MAX_ATTACHMENT_BYTES};
+use crate::db;
+use crate::error::ServerError;
 use crate::sessions::SessionWorktree;
 use crate::state::AppState;
 
-type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
+type ApiResult<T> = Result<Json<T>, ServerError>;
 
 #[derive(Debug, Deserialize)]
 pub struct Page {
@@ -283,24 +285,14 @@ async fn list_agents(
     State(state): State<Arc<AppState>>,
     Path(machine): Path<String>,
 ) -> ApiResult<Vec<Agent>> {
-    state
-        .machines
-        .agents(&machine)
-        .await
-        .map(Json)
-        .map_err(bad_request)
+    state.machines.agents(&machine).await.map(Json)
 }
 
 async fn rediscover(
     State(state): State<Arc<AppState>>,
     Path(machine): Path<String>,
 ) -> ApiResult<Vec<Agent>> {
-    state
-        .machines
-        .rediscover(&machine)
-        .await
-        .map(Json)
-        .map_err(bad_request)
+    state.machines.rediscover(&machine).await.map(Json)
 }
 
 async fn restart_agent(
@@ -312,7 +304,6 @@ async fn restart_agent(
         .restart_agent(&machine, &agent)
         .await
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn list_agent_models(
@@ -324,7 +315,6 @@ async fn list_agent_models(
         .agent_models(&machine, &agent)
         .await
         .map(Json)
-        .map_err(bad_request)
 }
 
 async fn list_dir(
@@ -347,7 +337,6 @@ async fn list_dir(
         )
         .await
         .map(Json)
-        .map_err(bad_request)
 }
 
 async fn read_file(
@@ -369,7 +358,6 @@ async fn read_file(
         )
         .await
         .map(Json)
-        .map_err(bad_request)
 }
 
 async fn machine_list_branches(
@@ -382,7 +370,6 @@ async fn machine_list_branches(
         .git_branches(&machine, &query.repo)
         .await
         .map(Json)
-        .map_err(bad_request)
 }
 
 // ---------- 普通会话 ----------
@@ -391,8 +378,7 @@ async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateSessionRequest>,
 ) -> ApiResult<Session> {
-    let worktree = SessionWorktree::new(request.use_worktree, request.worktree_base.as_ref())
-        .map_err(bad_request)?;
+    let worktree = SessionWorktree::new(request.use_worktree, request.worktree_base.as_ref())?;
     state
         .sessions
         .create(crate::sessions::CreateSessionParams {
@@ -406,18 +392,24 @@ async fn create_session(
         })
         .await
         .map(Json)
-        .map_err(bad_request)
 }
 
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
     Query(page): Query<Page>,
 ) -> Json<SessionList> {
-    let (sessions, has_more) = state.sessions.list(
-        page.limit(SESSION_LIST_DEFAULT_LIMIT),
-        page.offset(),
-        page.project.as_deref(),
-    );
+    let sessions = Arc::clone(&state.sessions);
+    let limit = page.limit(SESSION_LIST_DEFAULT_LIMIT);
+    let offset = page.offset();
+    let project = page.project.clone();
+    let (sessions, has_more) =
+        match db::blocking(move || sessions.list(limit, offset, project.as_deref())).await {
+            Ok(page) => page,
+            Err(error) => {
+                log::warn!("读取会话列表失败: {error}");
+                Default::default()
+            }
+        };
     Json(SessionList { sessions, has_more })
 }
 
@@ -425,7 +417,8 @@ async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Session> {
-    state.sessions.get(&id).map(Json).map_err(not_found)
+    let sessions = Arc::clone(&state.sessions);
+    db::blocking(move || sessions.get(&id)).await?.map(Json)
 }
 
 async fn prompt_session(
@@ -438,7 +431,6 @@ async fn prompt_session(
         .prompt(&id, request.input)
         .await
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn cancel_session(
@@ -450,14 +442,13 @@ async fn cancel_session(
         .cancel(&id)
         .await
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OpAck> {
-    state.sessions.delete(&id).await.map_err(bad_request)?;
+    state.sessions.delete(&id).await?;
     if let Err(error) = state.attachments.delete_all(AttachmentOwner::Session(&id)) {
         log::warn!("删除会话附件失败: session={id}: {error}");
     }
@@ -480,18 +471,16 @@ async fn configure_session(
         )
         .await
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn read_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OpAck> {
-    state
-        .sessions
-        .read(&id)
+    let sessions = Arc::clone(&state.sessions);
+    db::blocking(move || sessions.read(&id))
+        .await
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn session_config_options(
@@ -503,35 +492,45 @@ async fn session_config_options(
         .config_options(&id)
         .await
         .map(|options| Json(ConfigOptions { options }))
-        .map_err(bad_request)
 }
 
 async fn session_slash_commands(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<SlashCommands> {
-    state.sessions.get(&id).map_err(not_found)?;
-    Ok(Json(SlashCommands {
-        commands: state.sessions.slash_commands(&id),
-    }))
+    let sessions = Arc::clone(&state.sessions);
+    let commands = db::blocking(move || {
+        sessions.get(&id)?;
+        Ok::<_, ServerError>(sessions.slash_commands(&id))
+    })
+    .await??;
+    Ok(Json(SlashCommands { commands }))
 }
 
 async fn session_plan(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Plan> {
-    state.sessions.get(&id).map_err(not_found)?;
-    Ok(Json(Plan {
-        entries: state.sessions.plan(&id),
-    }))
+    let sessions = Arc::clone(&state.sessions);
+    let entries = db::blocking(move || {
+        sessions.get(&id)?;
+        Ok::<_, ServerError>(sessions.plan(&id))
+    })
+    .await??;
+    Ok(Json(Plan { entries }))
 }
 
 async fn session_usage(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Option<Usage>> {
-    state.sessions.get(&id).map_err(not_found)?;
-    Ok(Json(state.sessions.usage(&id)))
+    let sessions = Arc::clone(&state.sessions);
+    let usage = db::blocking(move || {
+        sessions.get(&id)?;
+        Ok::<_, ServerError>(sessions.usage(&id))
+    })
+    .await??;
+    Ok(Json(usage))
 }
 
 async fn session_history(
@@ -539,10 +538,14 @@ async fn session_history(
     Path(id): Path<String>,
     Query(page): Query<Page>,
 ) -> ApiResult<HistoryPage> {
-    state.sessions.get(&id).map_err(not_found)?;
     let limit = page.limit(SESSION_PAGE_DEFAULT_LIMIT);
     let offset = page.offset();
-    let (items, has_more) = state.sessions.history(&id, limit, offset);
+    let sessions = Arc::clone(&state.sessions);
+    let (items, has_more) = db::blocking(move || {
+        sessions.get(&id)?;
+        Ok::<_, ServerError>(sessions.history(&id, limit, offset))
+    })
+    .await??;
     Ok(Json(HistoryPage {
         items,
         has_more,
@@ -555,10 +558,14 @@ async fn session_activities(
     Path(id): Path<String>,
     Query(page): Query<Page>,
 ) -> ApiResult<ActivitiesPage> {
-    state.sessions.get(&id).map_err(not_found)?;
     let limit = page.limit(SESSION_PAGE_DEFAULT_LIMIT);
     let offset = page.offset();
-    let (activities, has_more) = state.sessions.activities(&id, limit, offset);
+    let sessions = Arc::clone(&state.sessions);
+    let (activities, has_more) = db::blocking(move || {
+        sessions.get(&id)?;
+        Ok::<_, ServerError>(sessions.activities(&id, limit, offset))
+    })
+    .await??;
     Ok(Json(ActivitiesPage {
         activities,
         has_more,
@@ -570,10 +577,13 @@ async fn session_ongoing(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OngoingActivity> {
-    state.sessions.get(&id).map_err(not_found)?;
-    Ok(Json(OngoingActivity {
-        activity: state.sessions.ongoing_activity(&id),
-    }))
+    let sessions = Arc::clone(&state.sessions);
+    let activity = db::blocking(move || {
+        sessions.get(&id)?;
+        Ok::<_, ServerError>(sessions.ongoing_activity(&id))
+    })
+    .await??;
+    Ok(Json(OngoingActivity { activity }))
 }
 
 async fn session_diff(
@@ -582,14 +592,9 @@ async fn session_diff(
     Query(query): Query<DiffQuery>,
 ) -> ApiResult<DiffResponse> {
     if query.base.trim().is_empty() {
-        return Err(bad_request("base 不能为空".to_string()));
+        return Err(ServerError::invalid_input("base 不能为空"));
     }
-    state
-        .sessions
-        .diff(&id, &query.base)
-        .await
-        .map(Json)
-        .map_err(bad_request)
+    state.sessions.diff(&id, &query.base).await.map(Json)
 }
 
 // ---------- 终端 ----------
@@ -604,15 +609,19 @@ async fn open_terminal(
         .terminal_open(&id, request.cwd, request.cols, request.rows)
         .await
         .map(|terminal_id| Json(amux_common::domain::TerminalOpenResult { terminal_id }))
-        .map_err(bad_request)
 }
 
 async fn list_terminals(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Vec<Terminal>> {
-    state.sessions.get(&id).map_err(not_found)?;
-    Ok(Json(state.sessions.terminals(&id)))
+    let sessions = Arc::clone(&state.sessions);
+    let terminals = db::blocking(move || {
+        sessions.get(&id)?;
+        Ok::<_, ServerError>(sessions.terminals(&id))
+    })
+    .await??;
+    Ok(Json(terminals))
 }
 
 async fn terminal_input(
@@ -625,21 +634,19 @@ async fn terminal_input(
         .terminal_input(&id, &terminal, request.data)
         .await
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn terminal_output(
     State(state): State<Arc<AppState>>,
     Path((id, terminal)): Path<(String, String)>,
-) -> Result<
-    Sse<impl futures_util::Stream<Item = Result<Event, Infallible>> + Send>,
-    (StatusCode, String),
-> {
-    state.sessions.get(&id).map_err(not_found)?;
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>> + Send>, ServerError> {
+    let sessions_service = Arc::clone(&state.sessions);
+    let check = id.clone();
+    db::blocking(move || sessions_service.get(&check)).await??;
     let subscription = state
         .sessions
         .subscribe_terminal(&terminal)
-        .ok_or_else(|| not_found("终端不存在".to_string()))?;
+        .ok_or_else(|| ServerError::not_found("终端不存在"))?;
     let stream = futures_util::StreamExt::map(subscription.into_stream(), |output| {
         let output = output.expect("终端输出流不会失败");
         Ok(Event::default()
@@ -663,7 +670,6 @@ async fn close_terminal(
         .terminal_close(&id, &terminal)
         .await
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 // ---------- 会话附件 ----------
@@ -673,12 +679,13 @@ async fn list_session_attachments(
     Path(id): Path<String>,
     Query(page): Query<Page>,
 ) -> ApiResult<AttachmentList> {
-    state.sessions.get(&id).map_err(not_found)?;
+    let sessions_service = Arc::clone(&state.sessions);
+    let check = id.clone();
+    db::blocking(move || sessions_service.get(&check)).await??;
     state
         .attachments
         .list(AttachmentOwner::Session(&id), page.limit(50), page.offset())
         .map(Json)
-        .map_err(bad_request)
 }
 
 async fn upload_session_attachment(
@@ -687,7 +694,9 @@ async fn upload_session_attachment(
     Query(upload): Query<UploadAttachment>,
     body: Bytes,
 ) -> ApiResult<Attachment> {
-    state.sessions.get(&id).map_err(not_found)?;
+    let sessions_service = Arc::clone(&state.sessions);
+    let check = id.clone();
+    db::blocking(move || sessions_service.get(&check)).await??;
     upload_attachment(
         &state,
         AttachmentOwner::Session(&id),
@@ -700,31 +709,35 @@ async fn delete_session_attachments(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OpAck> {
-    state.sessions.get(&id).map_err(not_found)?;
+    let sessions_service = Arc::clone(&state.sessions);
+    let check = id.clone();
+    db::blocking(move || sessions_service.get(&check)).await??;
     state
         .attachments
         .delete_all(AttachmentOwner::Session(&id))
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn delete_session_attachment(
     State(state): State<Arc<AppState>>,
     Path((id, name)): Path<(String, String)>,
 ) -> ApiResult<OpAck> {
-    state.sessions.get(&id).map_err(not_found)?;
+    let sessions_service = Arc::clone(&state.sessions);
+    let check = id.clone();
+    db::blocking(move || sessions_service.get(&check)).await??;
     state
         .attachments
         .delete(AttachmentOwner::Session(&id), &name)
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn download_session_attachment(
     State(state): State<Arc<AppState>>,
     Path((id, name)): Path<(String, String)>,
-) -> Result<Response, (StatusCode, String)> {
-    state.sessions.get(&id).map_err(not_found)?;
+) -> Result<Response, ServerError> {
+    let sessions_service = Arc::clone(&state.sessions);
+    let check = id.clone();
+    db::blocking(move || sessions_service.get(&check)).await??;
     download_attachment(&state, AttachmentOwner::Session(&id), &name)
 }
 
@@ -738,7 +751,6 @@ async fn resize_terminal(
         .terminal_resize(&id, &terminal, request.cols, request.rows)
         .await
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 // ---------- 群聊会话 ----------
@@ -752,23 +764,25 @@ async fn create_group(
         .create(&request.members, None, request.project.as_deref())
         .await
         .map(Json)
-        .map_err(bad_request)
 }
 
 async fn list_groups(
     State(state): State<Arc<AppState>>,
     Query(page): Query<Page>,
 ) -> Json<GroupList> {
-    let (groups, has_more) = state.groups.list(
-        page.limit(SESSION_LIST_DEFAULT_LIMIT),
-        page.offset(),
-        page.project.as_deref(),
-    );
+    let groups = Arc::clone(&state.groups);
+    let limit = page.limit(SESSION_LIST_DEFAULT_LIMIT);
+    let offset = page.offset();
+    let project = page.project.clone();
+    let (groups, has_more) = db::blocking(move || groups.list(limit, offset, project.as_deref()))
+        .await
+        .unwrap_or_default();
     Json(GroupList { groups, has_more })
 }
 
 async fn get_group(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResult<Group> {
-    state.groups.get(&id).map(Json).map_err(not_found)
+    let groups = Arc::clone(&state.groups);
+    db::blocking(move || groups.get(&id)).await?.map(Json)
 }
 
 async fn prompt_group(
@@ -781,7 +795,6 @@ async fn prompt_group(
         .prompt(&id, request.input)
         .await
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn cancel_group(
@@ -793,15 +806,16 @@ async fn cancel_group(
         .cancel(&id)
         .await
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn delete_group(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OpAck> {
-    let group = state.groups.get(&id).map_err(not_found)?;
-    state.groups.delete(&id).await.map_err(bad_request)?;
+    let groups = Arc::clone(&state.groups);
+    let check = id.clone();
+    let group = db::blocking(move || groups.get(&check)).await??;
+    state.groups.delete(&id).await?;
     if let Err(error) = state.attachments.delete_all(AttachmentOwner::Group(&id)) {
         log::warn!("删除群聊附件失败: group={id}: {error}");
     }
@@ -824,22 +838,20 @@ async fn configure_group(
     Path(id): Path<String>,
     Json(request): Json<ConfigureGroupRequest>,
 ) -> ApiResult<OpAck> {
-    state
-        .groups
-        .configure(&id, request.title, request.project, request.pinned)
+    let groups = Arc::clone(&state.groups);
+    db::blocking(move || groups.configure(&id, request.title, request.project, request.pinned))
+        .await?
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn read_group(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OpAck> {
-    state
-        .groups
-        .read(&id)
+    let groups = Arc::clone(&state.groups);
+    db::blocking(move || groups.read(&id))
+        .await?
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn group_history(
@@ -847,10 +859,14 @@ async fn group_history(
     Path(id): Path<String>,
     Query(page): Query<Page>,
 ) -> ApiResult<GroupHistoryPage> {
-    state.groups.get(&id).map_err(not_found)?;
     let limit = page.limit(SESSION_PAGE_DEFAULT_LIMIT);
     let offset = page.offset();
-    let (messages, has_more) = state.groups.history(&id, limit, offset);
+    let groups = Arc::clone(&state.groups);
+    let (messages, has_more) = db::blocking(move || {
+        groups.get(&id)?;
+        Ok::<_, ServerError>(groups.history(&id, limit, offset))
+    })
+    .await??;
     Ok(Json(GroupHistoryPage {
         items: messages,
         has_more,
@@ -863,12 +879,13 @@ async fn list_group_attachments(
     Path(id): Path<String>,
     Query(page): Query<Page>,
 ) -> ApiResult<AttachmentList> {
-    state.groups.get(&id).map_err(not_found)?;
+    let groups = Arc::clone(&state.groups);
+    let check = id.clone();
+    db::blocking(move || groups.get(&check)).await??;
     state
         .attachments
         .list(AttachmentOwner::Group(&id), page.limit(50), page.offset())
         .map(Json)
-        .map_err(bad_request)
 }
 
 async fn upload_group_attachment(
@@ -877,7 +894,9 @@ async fn upload_group_attachment(
     Query(upload): Query<UploadAttachment>,
     body: Bytes,
 ) -> ApiResult<Attachment> {
-    state.groups.get(&id).map_err(not_found)?;
+    let groups = Arc::clone(&state.groups);
+    let check = id.clone();
+    db::blocking(move || groups.get(&check)).await??;
     upload_attachment(&state, AttachmentOwner::Group(&id), &upload.filename, body)
 }
 
@@ -885,31 +904,35 @@ async fn delete_group_attachments(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OpAck> {
-    state.groups.get(&id).map_err(not_found)?;
+    let groups = Arc::clone(&state.groups);
+    let check = id.clone();
+    db::blocking(move || groups.get(&check)).await??;
     state
         .attachments
         .delete_all(AttachmentOwner::Group(&id))
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn delete_group_attachment(
     State(state): State<Arc<AppState>>,
     Path((id, name)): Path<(String, String)>,
 ) -> ApiResult<OpAck> {
-    state.groups.get(&id).map_err(not_found)?;
+    let groups = Arc::clone(&state.groups);
+    let check = id.clone();
+    db::blocking(move || groups.get(&check)).await??;
     state
         .attachments
         .delete(AttachmentOwner::Group(&id), &name)
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn download_group_attachment(
     State(state): State<Arc<AppState>>,
     Path((id, name)): Path<(String, String)>,
-) -> Result<Response, (StatusCode, String)> {
-    state.groups.get(&id).map_err(not_found)?;
+) -> Result<Response, ServerError> {
+    let groups = Arc::clone(&state.groups);
+    let check = id.clone();
+    db::blocking(move || groups.get(&check)).await??;
     download_attachment(&state, AttachmentOwner::Group(&id), &name)
 }
 
@@ -924,18 +947,20 @@ async fn create_workflow(
         .create(&request.plan, request.title, request.project.as_deref())
         .await
         .map(Json)
-        .map_err(bad_request)
 }
 
 async fn list_workflows(
     State(state): State<Arc<AppState>>,
     Query(page): Query<Page>,
 ) -> Json<WorkflowList> {
-    let (workflows, has_more) = state.workflows.list(
-        page.limit(SESSION_LIST_DEFAULT_LIMIT),
-        page.offset(),
-        page.project.as_deref(),
-    );
+    let workflows_service = Arc::clone(&state.workflows);
+    let limit = page.limit(SESSION_LIST_DEFAULT_LIMIT);
+    let offset = page.offset();
+    let project = page.project.clone();
+    let (workflows, has_more) =
+        db::blocking(move || workflows_service.list(limit, offset, project.as_deref()))
+            .await
+            .unwrap_or_default();
     Json(WorkflowList {
         workflows,
         has_more,
@@ -946,7 +971,8 @@ async fn get_workflow(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Workflow> {
-    state.workflows.get(&id).map(Json).map_err(not_found)
+    let workflows = Arc::clone(&state.workflows);
+    db::blocking(move || workflows.get(&id)).await?.map(Json)
 }
 
 async fn prompt_workflow(
@@ -959,15 +985,16 @@ async fn prompt_workflow(
         .prompt(&id, request.input)
         .await
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn delete_workflow(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OpAck> {
-    let workflow = state.workflows.get(&id).map_err(not_found)?;
-    state.workflows.delete(&id).await.map_err(bad_request)?;
+    let workflows = Arc::clone(&state.workflows);
+    let check = id.clone();
+    let workflow = db::blocking(move || workflows.get(&check)).await??;
+    state.workflows.delete(&id).await?;
     if let Err(error) = state.attachments.delete_all(AttachmentOwner::Workflow(&id)) {
         log::warn!("删除工作流附件失败: workflow={id}: {error}");
     }
@@ -987,7 +1014,9 @@ async fn list_workflow_attachments(
     Path(id): Path<String>,
     Query(page): Query<Page>,
 ) -> ApiResult<AttachmentList> {
-    state.workflows.get(&id).map_err(not_found)?;
+    let workflows = Arc::clone(&state.workflows);
+    let check = id.clone();
+    db::blocking(move || workflows.get(&check)).await??;
     state
         .attachments
         .list(
@@ -996,7 +1025,6 @@ async fn list_workflow_attachments(
             page.offset(),
         )
         .map(Json)
-        .map_err(bad_request)
 }
 
 async fn upload_workflow_attachment(
@@ -1005,7 +1033,9 @@ async fn upload_workflow_attachment(
     Query(upload): Query<UploadAttachment>,
     body: Bytes,
 ) -> ApiResult<Attachment> {
-    state.workflows.get(&id).map_err(not_found)?;
+    let workflows = Arc::clone(&state.workflows);
+    let check = id.clone();
+    db::blocking(move || workflows.get(&check)).await??;
     upload_attachment(
         &state,
         AttachmentOwner::Workflow(&id),
@@ -1018,31 +1048,35 @@ async fn delete_workflow_attachments(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OpAck> {
-    state.workflows.get(&id).map_err(not_found)?;
+    let workflows = Arc::clone(&state.workflows);
+    let check = id.clone();
+    db::blocking(move || workflows.get(&check)).await??;
     state
         .attachments
         .delete_all(AttachmentOwner::Workflow(&id))
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn delete_workflow_attachment(
     State(state): State<Arc<AppState>>,
     Path((id, name)): Path<(String, String)>,
 ) -> ApiResult<OpAck> {
-    state.workflows.get(&id).map_err(not_found)?;
+    let workflows = Arc::clone(&state.workflows);
+    let check = id.clone();
+    db::blocking(move || workflows.get(&check)).await??;
     state
         .attachments
         .delete(AttachmentOwner::Workflow(&id), &name)
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn download_workflow_attachment(
     State(state): State<Arc<AppState>>,
     Path((id, name)): Path<(String, String)>,
-) -> Result<Response, (StatusCode, String)> {
-    state.workflows.get(&id).map_err(not_found)?;
+) -> Result<Response, ServerError> {
+    let workflows = Arc::clone(&state.workflows);
+    let check = id.clone();
+    db::blocking(move || workflows.get(&check)).await??;
     download_attachment(&state, AttachmentOwner::Workflow(&id), &name)
 }
 
@@ -1051,30 +1085,33 @@ async fn configure_workflow(
     Path(id): Path<String>,
     Json(request): Json<ConfigureWorkflowRequest>,
 ) -> ApiResult<OpAck> {
-    state
-        .workflows
-        .configure(&id, request.title, request.project, request.pinned)
+    let workflows = Arc::clone(&state.workflows);
+    db::blocking(move || workflows.configure(&id, request.title, request.project, request.pinned))
+        .await?
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn read_workflow(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OpAck> {
-    state
-        .workflows
-        .read(&id)
+    let workflows = Arc::clone(&state.workflows);
+    db::blocking(move || workflows.read(&id))
+        .await?
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
 }
 
 async fn workflow_usage(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Option<Usage>> {
-    state.workflows.get(&id).map_err(not_found)?;
-    Ok(Json(state.workflows.usage(&id)))
+    let workflows = Arc::clone(&state.workflows);
+    let usage = db::blocking(move || {
+        workflows.get(&id)?;
+        Ok::<_, ServerError>(workflows.usage(&id))
+    })
+    .await??;
+    Ok(Json(usage))
 }
 
 async fn workflow_history(
@@ -1082,10 +1119,14 @@ async fn workflow_history(
     Path(id): Path<String>,
     Query(page): Query<Page>,
 ) -> ApiResult<HistoryPage> {
-    state.workflows.get(&id).map_err(not_found)?;
     let limit = page.limit(SESSION_PAGE_DEFAULT_LIMIT);
     let offset = page.offset();
-    let (items, has_more) = state.workflows.history(&id, limit, offset);
+    let workflows = Arc::clone(&state.workflows);
+    let (items, has_more) = db::blocking(move || {
+        workflows.get(&id)?;
+        Ok::<_, ServerError>(workflows.history(&id, limit, offset))
+    })
+    .await??;
     Ok(Json(HistoryPage {
         items,
         has_more,
@@ -1098,10 +1139,14 @@ async fn workflow_activities(
     Path(id): Path<String>,
     Query(page): Query<Page>,
 ) -> ApiResult<ActivitiesPage> {
-    state.workflows.get(&id).map_err(not_found)?;
     let limit = page.limit(SESSION_PAGE_DEFAULT_LIMIT);
     let offset = page.offset();
-    let (activities, has_more) = state.workflows.activities(&id, limit, offset);
+    let workflows = Arc::clone(&state.workflows);
+    let (activities, has_more) = db::blocking(move || {
+        workflows.get(&id)?;
+        Ok::<_, ServerError>(workflows.activities(&id, limit, offset))
+    })
+    .await??;
     Ok(Json(ActivitiesPage {
         activities,
         has_more,
@@ -1113,27 +1158,34 @@ async fn workflow_ongoing(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OngoingActivity> {
-    state.workflows.get(&id).map_err(not_found)?;
-    Ok(Json(OngoingActivity {
-        activity: state.workflows.ongoing_activity(&id),
-    }))
+    let workflows = Arc::clone(&state.workflows);
+    let activity = db::blocking(move || {
+        workflows.get(&id)?;
+        Ok::<_, ServerError>(workflows.ongoing_activity(&id))
+    })
+    .await??;
+    Ok(Json(OngoingActivity { activity }))
 }
 
 // ---------- 自动化 ----------
 
 async fn list_automations(State(state): State<Arc<AppState>>) -> Json<Vec<Automation>> {
-    Json(state.automations.list())
+    let automations = Arc::clone(&state.automations);
+    Json(
+        db::blocking(move || automations.list())
+            .await
+            .unwrap_or_default(),
+    )
 }
 
 async fn create_automation(
     State(state): State<Arc<AppState>>,
     Json(input): Json<AutomationInput>,
 ) -> ApiResult<Automation> {
-    state
-        .automations
-        .create(input)
+    let automations = Arc::clone(&state.automations);
+    db::blocking(move || automations.create(input))
+        .await?
         .map(Json)
-        .map_err(bad_request)
 }
 
 async fn update_automation(
@@ -1141,18 +1193,18 @@ async fn update_automation(
     Path(id): Path<String>,
     Json(input): Json<AutomationInput>,
 ) -> ApiResult<Automation> {
-    state
-        .automations
-        .update(&id, input)
+    let automations = Arc::clone(&state.automations);
+    db::blocking(move || automations.update(&id, input))
+        .await?
         .map(Json)
-        .map_err(bad_request)
 }
 
 async fn delete_automation(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OpAck> {
-    state.automations.delete(&id).map_err(bad_request)?;
+    let automations = Arc::clone(&state.automations);
+    db::blocking(move || automations.delete(&id)).await??;
     Ok(Json(OpAck { ok: true }))
 }
 
@@ -1163,10 +1215,9 @@ async fn automation_runs(
 ) -> ApiResult<AutomationRunList> {
     let limit = page.limit(SESSION_PAGE_DEFAULT_LIMIT);
     let offset = page.offset();
-    let (runs, has_more) = state
-        .automations
-        .runs_page(&id, limit, offset)
-        .map_err(bad_request)?;
+    let automations = Arc::clone(&state.automations);
+    let (runs, has_more) =
+        db::blocking(move || automations.runs_page(&id, limit, offset)).await??;
     Ok(Json(AutomationRunList { runs, has_more }))
 }
 
@@ -1174,12 +1225,7 @@ async fn trigger_automation(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<AutomationRun> {
-    state
-        .automations
-        .trigger(&id)
-        .await
-        .map(Json)
-        .map_err(bad_request)
+    state.automations.trigger(&id).await.map(Json)
 }
 
 async fn github_webhook(
@@ -1194,15 +1240,11 @@ async fn github_webhook(
     let signature = headers
         .get("x-hub-signature-256")
         .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| bad_request("缺少 X-Hub-Signature-256 请求头".into()))?;
+        .ok_or_else(|| ServerError::invalid_input("缺少 X-Hub-Signature-256 请求头"))?;
     verify_github_signature(&state.token, signature, &body)?;
     let body: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|error| bad_request(format!("Webhook JSON 无效: {error}")))?;
-    let matched = state
-        .automations
-        .github_webhook(event, &body)
-        .await
-        .map_err(bad_request)?;
+        .map_err(|error| ServerError::invalid_input(format!("Webhook JSON 无效: {error}")))?;
+    let matched = state.automations.github_webhook(event, &body).await?;
     log::info!("GitHub Webhook 已处理: event={event} matched={matched}");
     Ok(Json(OpAck { ok: true }))
 }
@@ -1217,7 +1259,10 @@ async fn put_skills(
     State(state): State<Arc<AppState>>,
     Json(skills): Json<Vec<Skill>>,
 ) -> ApiResult<OpAck> {
-    state.config.set_skills(&skills).map_err(bad_request)?;
+    state
+        .config
+        .set_skills(&skills)
+        .map_err(ServerError::invalid_input)?;
     log::info!("技能配置已更新: {} 项", skills.len());
     Ok(Json(OpAck { ok: true }))
 }
@@ -1233,7 +1278,7 @@ async fn put_plans(
     state
         .config
         .set_workflow_plans(&plans)
-        .map_err(bad_request)?;
+        .map_err(ServerError::invalid_input)?;
     log::info!("工作流计划配置已更新: {} 项", plans.len());
     Ok(Json(OpAck { ok: true }))
 }
@@ -1250,7 +1295,7 @@ async fn put_recent_workspaces(
         .config
         .set_recent_workspaces(&workspaces)
         .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
+        .map_err(ServerError::invalid_input)
 }
 
 // ---------- 项目管理 ----------
@@ -1263,7 +1308,10 @@ async fn create_project(
     State(state): State<Arc<AppState>>,
     Json(project): Json<Project>,
 ) -> ApiResult<OpAck> {
-    state.config.add_project(&project).map_err(bad_request)?;
+    state
+        .config
+        .add_project(&project)
+        .map_err(ServerError::invalid_input)?;
     log::info!("项目已创建: {}", project.name);
     Ok(Json(OpAck { ok: true }))
 }
@@ -1275,7 +1323,7 @@ async fn set_project_order(
     state
         .config
         .set_project_order(&request.names)
-        .map_err(bad_request)?;
+        .map_err(ServerError::invalid_input)?;
     log::info!("项目顺序已更新: {} 项", request.names.len());
     Ok(Json(OpAck { ok: true }))
 }
@@ -1288,7 +1336,7 @@ async fn update_project(
     state
         .config
         .update_project(&name, &request.description)
-        .map_err(bad_request)?;
+        .map_err(ServerError::invalid_input)?;
     log::info!("项目已更新: {name}");
     Ok(Json(OpAck { ok: true }))
 }
@@ -1297,12 +1345,22 @@ async fn delete_project(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> ApiResult<OpAck> {
-    state.config.delete_project(&name).map_err(bad_request)?;
+    state
+        .config
+        .delete_project(&name)
+        .map_err(ServerError::invalid_input)?;
     log::info!("项目已删除: {name}");
     // 项目删除后，其下会话回到未归属（docs/PRD.md「项目管理」）
-    state.sessions.unassign_project(&name);
-    state.workflows.unassign_project(&name);
-    state.groups.unassign_project(&name);
+    let sessions = Arc::clone(&state.sessions);
+    let workflows = Arc::clone(&state.workflows);
+    let groups = Arc::clone(&state.groups);
+    let project = name.clone();
+    db::blocking(move || {
+        sessions.unassign_project(&project);
+        workflows.unassign_project(&project);
+        groups.unassign_project(&project);
+    })
+    .await?;
     Ok(Json(OpAck { ok: true }))
 }
 
@@ -1317,7 +1375,7 @@ async fn put_group_members(
     state
         .config
         .set_group_members(&members)
-        .map_err(bad_request)?;
+        .map_err(ServerError::invalid_input)?;
     log::info!("群聊预设成员配置已更新: {} 项", members.len());
     Ok(Json(OpAck { ok: true }))
 }
@@ -1333,7 +1391,7 @@ async fn put_quick_commands(
     state
         .config
         .set_quick_commands(&commands)
-        .map_err(bad_request)?;
+        .map_err(ServerError::invalid_input)?;
     log::info!("快捷指令配置已更新: {} 项", commands.len());
     Ok(Json(OpAck { ok: true }))
 }
@@ -1349,7 +1407,7 @@ async fn put_orchestrator(
     state
         .config
         .set_orchestrator(&config)
-        .map_err(bad_request)?;
+        .map_err(ServerError::invalid_input)?;
     log::info!("内置智能体配置已更新: {}", config.model);
     Ok(Json(OpAck { ok: true }))
 }
@@ -1364,7 +1422,10 @@ async fn put_automation_config(
     State(state): State<Arc<AppState>>,
     Json(config): Json<AutomationConfig>,
 ) -> ApiResult<OpAck> {
-    state.config.set_automation(&config).map_err(bad_request)?;
+    state
+        .config
+        .set_automation(&config)
+        .map_err(ServerError::invalid_input)?;
     log::info!("自动化决策模型配置已更新: {}", config.model);
     Ok(Json(OpAck { ok: true }))
 }
@@ -1375,21 +1436,17 @@ pub struct OpAck {
     pub ok: bool,
 }
 
-fn verify_github_signature(
-    secret: &str,
-    signature: &str,
-    body: &[u8],
-) -> Result<(), (StatusCode, String)> {
+fn verify_github_signature(secret: &str, signature: &str, body: &[u8]) -> Result<(), ServerError> {
     let signature = signature
         .strip_prefix("sha256=")
-        .ok_or_else(|| bad_request("X-Hub-Signature-256 格式无效".into()))?;
-    let signature =
-        decode_hex(signature).ok_or_else(|| bad_request("X-Hub-Signature-256 格式无效".into()))?;
+        .ok_or_else(|| ServerError::invalid_input("X-Hub-Signature-256 格式无效"))?;
+    let signature = decode_hex(signature)
+        .ok_or_else(|| ServerError::invalid_input("X-Hub-Signature-256 格式无效"))?;
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .map_err(|error| bad_request(format!("校验 Webhook 签名失败: {error}")))?;
+        .map_err(|error| ServerError::internal(format!("校验 Webhook 签名失败: {error}")))?;
     mac.update(body);
     mac.verify_slice(&signature)
-        .map_err(|_| bad_request("Webhook 签名校验失败".into()))
+        .map_err(|_| ServerError::invalid_input("Webhook 签名校验失败"))
 }
 
 fn decode_hex(value: &str) -> Option<Vec<u8>> {
@@ -1409,19 +1466,6 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-fn bad_request(message: String) -> (StatusCode, String) {
-    let status = if message.contains("不存在") || message.contains("未连接") {
-        StatusCode::NOT_FOUND
-    } else {
-        StatusCode::BAD_REQUEST
-    };
-    (status, message)
-}
-
-fn not_found(message: String) -> (StatusCode, String) {
-    (StatusCode::NOT_FOUND, message)
-}
-
 fn upload_attachment(
     state: &AppState,
     owner: AttachmentOwner<'_>,
@@ -1429,21 +1473,17 @@ fn upload_attachment(
     body: Bytes,
 ) -> ApiResult<Attachment> {
     if body.len() > MAX_ATTACHMENT_BYTES {
-        return Err(bad_request("单个附件不得超过 20 MB".into()));
+        return Err(ServerError::invalid_input("单个附件不得超过 20 MB"));
     }
-    state
-        .attachments
-        .save(owner, filename, &body)
-        .map(Json)
-        .map_err(bad_request)
+    state.attachments.save(owner, filename, &body).map(Json)
 }
 
 fn download_attachment(
     state: &AppState,
     owner: AttachmentOwner<'_>,
     name: &str,
-) -> Result<Response, (StatusCode, String)> {
-    let bytes = state.attachments.read(owner, name).map_err(not_found)?;
+) -> Result<Response, ServerError> {
+    let bytes = state.attachments.read(owner, name)?;
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
@@ -1452,7 +1492,7 @@ fn download_attachment(
             format!("attachment; filename=\"{name}\""),
         )
         .body(Body::from(bytes))
-        .map_err(|error| bad_request(format!("构造下载响应失败: {error}")))
+        .map_err(|error| ServerError::internal(format!("构造下载响应失败: {error}")))
 }
 
 #[cfg(test)]

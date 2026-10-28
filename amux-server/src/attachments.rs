@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use amux_common::api::{Attachment, AttachmentList};
 use uuid::Uuid;
 
+use crate::error::{ServerError, ServerResult};
 use crate::timestamps::now_ms;
 
 /// 单个附件上限。
@@ -48,12 +49,12 @@ impl AttachmentStore {
         owner: AttachmentOwner<'_>,
         original_name: &str,
         bytes: &[u8],
-    ) -> Result<Attachment, String> {
+    ) -> ServerResult<Attachment> {
         if bytes.is_empty() {
-            return Err("附件内容为空".into());
+            return Err(ServerError::invalid_input("附件内容为空"));
         }
         if bytes.len() > MAX_ATTACHMENT_BYTES {
-            return Err("单个附件不得超过 20 MB".into());
+            return Err(ServerError::invalid_input("单个附件不得超过 20 MB"));
         }
         let extension = Path::new(original_name)
             .extension()
@@ -70,8 +71,10 @@ impl AttachmentStore {
             None => Uuid::new_v4().to_string(),
         };
         let dir = self.directory(owner);
-        fs::create_dir_all(&dir).map_err(|error| format!("创建附件目录失败: {error}"))?;
-        fs::write(dir.join(&name), bytes).map_err(|error| format!("写入附件失败: {error}"))?;
+        fs::create_dir_all(&dir)
+            .map_err(|error| ServerError::internal(format!("创建附件目录失败: {error}")))?;
+        fs::write(dir.join(&name), bytes)
+            .map_err(|error| ServerError::internal(format!("写入附件失败: {error}")))?;
         let created_at = now_ms();
         Ok(Attachment {
             name: name.clone(),
@@ -85,7 +88,7 @@ impl AttachmentStore {
         owner: AttachmentOwner<'_>,
         limit: usize,
         offset: usize,
-    ) -> Result<AttachmentList, String> {
+    ) -> ServerResult<AttachmentList> {
         let dir = self.directory(owner);
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
@@ -95,14 +98,15 @@ impl AttachmentStore {
                     has_more: false,
                 });
             }
-            Err(error) => return Err(format!("读取附件目录失败: {error}")),
+            Err(error) => return Err(ServerError::internal(format!("读取附件目录失败: {error}"))),
         };
         let mut attachments = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|error| format!("读取附件失败: {error}"))?;
+            let entry =
+                entry.map_err(|error| ServerError::internal(format!("读取附件失败: {error}")))?;
             if !entry
                 .file_type()
-                .map_err(|error| format!("读取附件类型失败: {error}"))?
+                .map_err(|error| ServerError::internal(format!("读取附件类型失败: {error}")))?
                 .is_file()
             {
                 continue;
@@ -110,7 +114,7 @@ impl AttachmentStore {
             let name = entry.file_name().to_string_lossy().into_owned();
             let metadata = entry
                 .metadata()
-                .map_err(|error| format!("读取附件元信息失败: {error}"))?;
+                .map_err(|error| ServerError::internal(format!("读取附件元信息失败: {error}")))?;
             let created_at = metadata
                 .modified()
                 .ok()
@@ -135,26 +139,29 @@ impl AttachmentStore {
         })
     }
 
-    pub fn read(&self, owner: AttachmentOwner<'_>, name: &str) -> Result<Vec<u8>, String> {
+    pub fn read(&self, owner: AttachmentOwner<'_>, name: &str) -> ServerResult<Vec<u8>> {
         let path = self.attachment_path(owner, name)?;
-        fs::read(path).map_err(|error| format!("读取附件失败: {error}"))
+        fs::read(&path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ServerError::not_found("附件不存在"),
+            _ => ServerError::internal(format!("读取附件失败: {error}")),
+        })
     }
 
-    pub fn delete(&self, owner: AttachmentOwner<'_>, name: &str) -> Result<(), String> {
+    pub fn delete(&self, owner: AttachmentOwner<'_>, name: &str) -> ServerResult<()> {
         let path = self.attachment_path(owner, name)?;
         match fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!("删除附件失败: {error}")),
+            Err(error) => Err(ServerError::internal(format!("删除附件失败: {error}"))),
         }
     }
 
-    pub fn delete_all(&self, owner: AttachmentOwner<'_>) -> Result<(), String> {
+    pub fn delete_all(&self, owner: AttachmentOwner<'_>) -> ServerResult<()> {
         let dir = self.directory(owner);
         match fs::remove_dir_all(dir) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!("删除附件失败: {error}")),
+            Err(error) => Err(ServerError::internal(format!("删除附件失败: {error}"))),
         }
     }
 
@@ -165,12 +172,12 @@ impl AttachmentStore {
             .join("attachments")
     }
 
-    fn attachment_path(&self, owner: AttachmentOwner<'_>, name: &str) -> Result<PathBuf, String> {
+    fn attachment_path(&self, owner: AttachmentOwner<'_>, name: &str) -> ServerResult<PathBuf> {
         if Path::new(name).file_name() != Some(std::ffi::OsStr::new(name))
             || name == "."
             || name == ".."
         {
-            return Err("附件名称无效".into());
+            return Err(ServerError::invalid_input("附件名称无效"));
         }
         Ok(self.directory(owner).join(name))
     }
