@@ -28,6 +28,7 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 | `machine.info` | 获取当前机器信息，包含操作系统、临时目录等 |
 | `agent.list` | 发现当前机器已安装的 agents，以及 agent 是否启动 |
 | `agent.restart` | 重启指定 agent |
+| `agent.upgrade` | 升级指定 agent |
 | `agent.models` | 查询指定 agent 模型列表 |
 | `git.diff` | 查询指定仓库改动 diff，对基准分支与 HEAD 的 merge-base 后的工作区做三点对比，覆盖已提交与未提交改动及未跟踪文件。基准分支为远程跟踪分支时，先从其所属远程更新该分支，更新失败返回错误 |
 | `git.branches` | 查询指定仓库本地分支和远程跟踪分支，并标记 worktree 基分支和远程仓库默认分支 |
@@ -69,6 +70,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/machines/<machine_name>/agents` | 查询当前机器的 agents，包含名称、状态和打开会话数 |
 | POST `/machines/<machine_name>/agents/rediscover` | 重新发现 agents |
 | POST `/machines/<machine_name>/agents/<agent_name>/restart` | 重启指定 agent |
+| POST `/machines/<machine_name>/agents/<agent_name>/upgrade` | 升级指定 agent |
 | GET `/machines/<machine_name>/agents/<agent_name>/models` | 查询指定 agent 模型列表 |
 | GET `/machines/<machine_name>/list_dir` | 分页查看指定路径文件夹列表 |
 | GET `/machines/<machine_name>/read_file` | 分页查看指定路径文本文件内容 |
@@ -182,21 +184,21 @@ Daemon 启动时对 `~/.amux/daemon/<机器名>.lock` 锁文件加排他锁，�
 
 Daemon 关闭时，关闭所有已启动的 Agents。
 
-### Agent 发现
+### Agent 发现和启动
 
-| agent | 发现方式 |
+| agent | 发现方式 | 启动方式 |
+|---|---|---|
+| nano | 已内置 | 进程内启动 |
+| codex | `codex-acp` 可用 | `INITIAL_AGENT_MODE=agent-full-access codex-acp` |
+| claude | `claude-agent-acp` 可用 | `CLAUDE_AGENT_ACP_EXPERIMENTAL_V2=1 claude-agent-acp` |
+
+### Agent 升级
+
+| agent | 升级方式 |
 |---|---|
-| nano | 已内置 |
-| codex | npx 可用 |
-| claude | npx 可用 |
-
-### Agent 启动
-
-| agent | 启动方式 |
-|---|---|
-| nano | 进程内启动 |
-| codex | `INITIAL_AGENT_MODE=agent-full-access npx -y @agentclientprotocol/codex-acp` |
-| claude | `CLAUDE_AGENT_ACP_EXPERIMENTAL_V2=1 npx -y @agentclientprotocol/claude-agent-acp` |
+| nano | 忽略并返回成功 |
+| codex | `npm install -g @agentclientprotocol/codex-acp` |
+| claude | `npm install -g @agentclientprotocol/claude-agent-acp` |
 
 ### Agent 模型列表
 
