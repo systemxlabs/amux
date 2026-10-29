@@ -33,7 +33,6 @@ import {
   usagePercent,
 } from "../lib/format";
 import { completeMention, matchMentions } from "../lib/mention";
-import { pageSizeForViewport } from "../lib/paging";
 import { matchSlashCommands } from "../lib/slash";
 import { execDir } from "../lib/types";
 import type {
@@ -49,6 +48,32 @@ import { useIsMobile } from "../lib/viewport";
 
 /** 输入框拖拽下限：与 Textarea 的 `min-h-16` 一致。 */
 const INPUT_MIN_HEIGHT = 64;
+/** 距离列表边界不足该数量的视口时预取相邻页。 */
+const PREFETCH_VIEWPORTS = 2;
+
+type ScrollAnchor = { id: string; offset: number };
+
+function captureScrollAnchor(element: HTMLDivElement): ScrollAnchor | null {
+  const containerTop = element.getBoundingClientRect().top;
+  const first = [...element.querySelectorAll<HTMLElement>("[data-scroll-item]")].find(
+    (item) => item.getBoundingClientRect().bottom > containerTop,
+  );
+  if (first === undefined) return null;
+  return {
+    id: first.dataset.scrollItem ?? "",
+    offset: first.getBoundingClientRect().top - containerTop,
+  };
+}
+
+function restoreScrollAnchor(element: HTMLDivElement, anchor: ScrollAnchor): boolean {
+  const current = [...element.querySelectorAll<HTMLElement>("[data-scroll-item]")].find(
+    (item) => item.dataset.scrollItem === anchor.id,
+  );
+  if (current === undefined) return false;
+  const containerTop = element.getBoundingClientRect().top;
+  element.scrollTop += current.getBoundingClientRect().top - containerTop - anchor.offset;
+  return true;
+}
 
 export function InteractionView() {
   const core = useCore();
@@ -64,6 +89,8 @@ export function InteractionView() {
   const previousHeight = useRef(0);
   const scrollOnEntry = useRef(true);
   const followingBottom = useRef(true);
+  const initialPositioned = useRef(false);
+  const scrollAnchor = useRef<ScrollAnchor | null>(null);
   const previousTarget = useRef<string | null>(null);
   // 输入框高度（拖拽调整；null 表示用 rows 的默认高度）
   const [inputHeight, setInputHeight] = useState<number | null>(null);
@@ -112,6 +139,8 @@ export function InteractionView() {
       previousTarget.current = targetKey;
       scrollOnEntry.current = true;
       followingBottom.current = true;
+      initialPositioned.current = false;
+      scrollAnchor.current = null;
       previousHeight.current = 0;
     }
     const element = listRef.current;
@@ -120,6 +149,7 @@ export function InteractionView() {
     if (!scrollOnEntry.current && !followingBottom.current) return;
     element.scrollTop = element.scrollHeight;
     scrollOnEntry.current = false;
+    initialPositioned.current = true;
   });
 
   useEffect(() => {
@@ -141,9 +171,15 @@ export function InteractionView() {
     const height = element.scrollHeight;
     const shift = historyPaging.shift;
     if (shift !== null) {
-      if (shift > 0 && previousHeight.current > 0) {
-        element.scrollTop += height - previousHeight.current;
+      if (shift > 0 && !followingBottom.current) {
+        const anchor = scrollAnchor.current;
+        if (anchor === null || !restoreScrollAnchor(element, anchor)) {
+          if (previousHeight.current > 0) {
+            element.scrollTop += height - previousHeight.current;
+          }
+        }
       }
+      scrollAnchor.current = null;
       core.update((next) => {
         if (isGroup) next.detail.groupHistoryPaging.shift = null;
         else next.detail.historyPaging.shift = null;
@@ -236,64 +272,54 @@ export function InteractionView() {
     };
   }, [core, detail.session, isSession]);
 
-  // 页大小随可视高度自适应：首次渲染与窗口/容器尺寸变化时也重新计算（不只是滚动事件）
+  const ensureBuffers = () => {
+    const element = listRef.current;
+    if (!element || !initialPositioned.current) return;
+    const viewport = element.clientHeight;
+    if (historyPaging.hasOlder && element.scrollTop <= viewport * PREFETCH_VIEWPORTS) {
+      if (!historyPaging.loadingOlder) {
+        if (!followingBottom.current) {
+          scrollAnchor.current = captureScrollAnchor(element);
+        }
+        void loadOlderHistory(core);
+      }
+      return;
+    }
+    const bottomGap = element.scrollHeight - element.scrollTop - element.clientHeight;
+    if (
+      historyPaging.hasNewer &&
+      bottomGap <= viewport * PREFETCH_VIEWPORTS &&
+      !historyPaging.loadingNewer
+    ) {
+      void loadNewerHistory(core);
+    }
+  };
+
+  // 首屏定位和每次窗口变化后补足上下缓冲；加载结果会再次进入本副作用。
   useEffect(() => {
     const element = listRef.current;
-    if (!element) return;
-    const updatePageSize = () => {
-      const size = pageSizeForViewport(
-        element.clientHeight,
-        element.scrollHeight,
-        historyCount,
-      );
-      core.update((next) => {
-        if (isGroup) next.detail.groupHistoryPaging.pageSize = size;
-        else next.detail.historyPaging.pageSize = size;
-      });
-    };
-    updatePageSize();
-    const observer = new ResizeObserver(updatePageSize);
+    ensureBuffers();
+    if (element === null) return;
+    const observer = new ResizeObserver(ensureBuffers);
     observer.observe(element);
-    window.addEventListener("resize", updatePageSize);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", updatePageSize);
-    };
-  }, [core, historyCount, isGroup]);
+    return () => observer.disconnect();
+  }, [
+    core,
+    detail.groupHistory,
+    detail.history,
+    historyCount,
+    historyPaging.hasNewer,
+    historyPaging.hasOlder,
+    historyPaging.loadingNewer,
+    historyPaging.loadingOlder,
+  ]);
 
   const onScroll = () => {
     const element = listRef.current;
     if (!element) return;
     followingBottom.current =
       element.scrollHeight - element.scrollTop - element.clientHeight <= 1;
-    const size = pageSizeForViewport(
-      element.clientHeight,
-      element.scrollHeight,
-      historyCount,
-    );
-    if (size !== historyPaging.pageSize) {
-      core.update((next) => {
-        if (isGroup) next.detail.groupHistoryPaging.pageSize = size;
-        else next.detail.historyPaging.pageSize = size;
-      });
-    }
-    const nearOlderEdge = element.scrollTop <= element.clientHeight;
-    const nearNewerEdge =
-      element.scrollHeight - element.scrollTop - element.clientHeight <= element.clientHeight;
-    if (
-      nearOlderEdge &&
-      historyPaging.hasOlder &&
-      !historyPaging.loadingOlder
-    ) {
-      void loadOlderHistory(core);
-    }
-    if (
-      nearNewerEdge &&
-      historyPaging.hasNewer &&
-      !historyPaging.loadingNewer
-    ) {
-      void loadNewerHistory(core);
-    }
+    ensureBuffers();
   };
 
   const send = async () => {
@@ -718,6 +744,7 @@ function MessageBubble({ item }: { item: HistoryItem }) {
   return (
     <div
       data-slot="message"
+      data-scroll-item={item.id}
       data-role={item.role}
       className={cn("mb-3 flex flex-col", mine ? "items-end" : "items-start")}
     >
@@ -749,6 +776,7 @@ function GroupMessageBubble({
   return (
     <div
       data-slot="group-message"
+      data-scroll-item={item.id}
       data-role={mine ? "user" : "agent"}
       data-highlight={highlightsUser ? "true" : "false"}
       className={cn("mb-3 flex flex-col", mine ? "items-end" : "items-start")}

@@ -6,11 +6,9 @@ import {
   beginNewerPage,
   beginOlderPage,
   DEFAULT_PAGE_SIZE,
-  MAX_PAGE_SIZE,
   MAX_WINDOW_ITEMS,
   mergeNewest,
   newPaging,
-  pageSizeForViewport,
   prependNewer,
   prependOlder,
   refreshFetch,
@@ -23,30 +21,6 @@ import {
 type Item = { id: string; text: string };
 
 const idOf = (item: Item) => item.id;
-
-describe("pageSizeForViewport", () => {
-  it("按可视高度与已加载条目均摊高度算出容纳条数", () => {
-    // 视口 400、内容 800、已加载 20 条 → 每条 40px → 容纳 10 条
-    expect(pageSizeForViewport(400, 800, 20)).toBe(10);
-  });
-
-  it("无法计算时回落到默认页大小", () => {
-    expect(pageSizeForViewport(0, 800, 20)).toBe(DEFAULT_PAGE_SIZE);
-    expect(pageSizeForViewport(400, 800, 0)).toBe(DEFAULT_PAGE_SIZE);
-  });
-
-  it("行数远多于可视高度时夹到上限", () => {
-    // 视口 1000、内容 2000、已加载 1000 条 → 每条 2px → 可容纳 500 条 → 取上限
-    expect(pageSizeForViewport(1000, 2000, 1000)).toBe(MAX_PAGE_SIZE);
-  });
-
-  it("内容未溢满视口时保持默认页大小（比值退化为已加载条数会让刷新丢掉更早条目）", () => {
-    // 列表只有 1 条且未溢出：比值 = 1，若据此写入页大小，刷新时 limit 塌到 1，
-    // 服务端返回的最新一条会替换掉整个窗口，导致更早的用户消息从界面上消失。
-    expect(pageSizeForViewport(830, 830, 1)).toBe(DEFAULT_PAGE_SIZE);
-    expect(pageSizeForViewport(830, 400, 1)).toBe(DEFAULT_PAGE_SIZE);
-  });
-});
 
 describe("refreshLimit", () => {
   it("至少覆盖已加载窗口，保证刷新后窗口连续", () => {

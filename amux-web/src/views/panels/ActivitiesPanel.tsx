@@ -10,11 +10,34 @@ import {
   activitySummary,
   formatTime,
 } from "../../lib/format";
-import { pageSizeForViewport } from "../../lib/paging";
 import type { Activity } from "../../lib/types";
 
-/** 距顶/底多少像素内视为「滚动到边界」（只有真正到达边界才预取下一页）。 */
-const EDGE_THRESHOLD = 8;
+/** 距离列表边界不足该数量的视口时预取相邻页。 */
+const PREFETCH_VIEWPORTS = 2;
+
+type ScrollAnchor = { id: string; offset: number };
+
+function captureScrollAnchor(element: HTMLDivElement): ScrollAnchor | null {
+  const containerTop = element.getBoundingClientRect().top;
+  const first = [...element.querySelectorAll<HTMLElement>("[data-scroll-item]")].find(
+    (item) => item.getBoundingClientRect().bottom > containerTop,
+  );
+  if (first === undefined) return null;
+  return {
+    id: first.dataset.scrollItem ?? "",
+    offset: first.getBoundingClientRect().top - containerTop,
+  };
+}
+
+function restoreScrollAnchor(element: HTMLDivElement, anchor: ScrollAnchor): boolean {
+  const current = [...element.querySelectorAll<HTMLElement>("[data-scroll-item]")].find(
+    (item) => item.dataset.scrollItem === anchor.id,
+  );
+  if (current === undefined) return false;
+  const containerTop = element.getBoundingClientRect().top;
+  element.scrollTop += current.getBoundingClientRect().top - containerTop - anchor.offset;
+  return true;
+}
 
 type RowProps = { activity: Activity; expanded: boolean; onToggle: () => void };
 
@@ -22,6 +45,7 @@ function ActivityRow({ activity, expanded, onToggle }: RowProps) {
   return (
     <div
       data-slot="activity-item"
+      data-scroll-item={activity.id}
       role="button"
       tabIndex={0}
       className="cursor-pointer rounded-md bg-muted/40 p-2 hover:bg-muted"
@@ -58,6 +82,8 @@ export function ActivitiesPanel() {
   const previousHeight = useRef(0);
   const scrollOnEntry = useRef(true);
   const followingBottom = useRef(true);
+  const initialPositioned = useRef(false);
+  const scrollAnchor = useRef<ScrollAnchor | null>(null);
   const [expanded, setExpanded] = useState<string[]>([]);
 
   const activities = state.detail.activities;
@@ -65,26 +91,36 @@ export function ActivitiesPanel() {
   const shift = paging.shift;
   const target = state.open;
 
-  /**
-   * 内容不足一屏时主动补拉更早一页。
-   *
-   * 此时面板没有可滚动区域，滚轮与滚动条都不产生 scroll 事件，只在边界预取的 handleScroll
-   * 永远不触发（大窗口下列表卡在第一页，表现为「滚轮完全没反应」）。补拉到填满可视区或没有
-   * 更早的活动为止。
-   */
-  const fillViewport = (): void => {
+  const ensureBuffers = (): void => {
     const element = scrollRef.current;
-    if (element === null) return;
+    if (element === null || !initialPositioned.current) return;
     const current = core.state.detail.activitiesPaging;
-    if (!current.hasOlder || current.loadingOlder) return;
-    if (element.scrollHeight > element.clientHeight) return;
-    void loadOlderActivities(core);
+    const viewport = element.clientHeight;
+    if (current.hasOlder && element.scrollTop <= viewport * PREFETCH_VIEWPORTS) {
+      if (!current.loadingOlder) {
+        if (!followingBottom.current) {
+          scrollAnchor.current = captureScrollAnchor(element);
+        }
+        void loadOlderActivities(core);
+      }
+      return;
+    }
+    const bottomGap = element.scrollHeight - element.scrollTop - element.clientHeight;
+    if (
+      current.hasNewer &&
+      bottomGap <= viewport * PREFETCH_VIEWPORTS &&
+      !current.loadingNewer
+    ) {
+      void loadNewerActivities(core);
+    }
   };
 
   // 每条进入时默认滚动到底部；切换会话（面板保持打开）时重新贴底
   useLayoutEffect(() => {
     scrollOnEntry.current = true;
     followingBottom.current = true;
+    initialPositioned.current = false;
+    scrollAnchor.current = null;
   }, [core, target?.kind, target?.id]);
 
   useLayoutEffect(() => {
@@ -93,16 +129,24 @@ export function ActivitiesPanel() {
     if (!scrollOnEntry.current && !followingBottom.current) return;
     element.scrollTop = element.scrollHeight;
     scrollOnEntry.current = false;
+    initialPositioned.current = true;
   }, [activities]);
 
-  // 更早一页插入后内容整体下移：在下一帧之前按插入高度补偿滚动位置，
-  // 让插入前可见的条目停在原处（上一帧已记录插入前的内容高度）
+  // 更早一页插入后以首个可见条目为锚点恢复位置；无法找到时回退到高度差补偿。
   useLayoutEffect(() => {
     const element = scrollRef.current;
     if (element === null) return;
     const height = element.scrollHeight;
     if (shift !== null) {
-      if (previousHeight.current > 0) element.scrollTop += height - previousHeight.current;
+      if (!followingBottom.current) {
+        const anchor = scrollAnchor.current;
+        if (anchor === null || !restoreScrollAnchor(element, anchor)) {
+          if (previousHeight.current > 0) {
+            element.scrollTop += height - previousHeight.current;
+          }
+        }
+      }
+      scrollAnchor.current = null;
       core.update((next) => {
         next.detail.activitiesPaging.shift = null;
       });
@@ -110,62 +154,29 @@ export function ActivitiesPanel() {
     previousHeight.current = height;
   }, [core, activities, shift, expanded]);
 
-  // 页大小随可视高度自适应：首次渲染与尺寸变化时也重新计算；顺带补拉填满可视区
+  // 首屏定位和每次窗口变化后补足上下缓冲；加载结果会再次进入本副作用。
   useEffect(() => {
     const element = scrollRef.current;
+    ensureBuffers();
     if (element === null) return;
-    const updatePageSize = () => {
-      const size = pageSizeForViewport(
-        element.clientHeight,
-        element.scrollHeight,
-        core.state.detail.activities.length,
-      );
-      core.update((next) => {
-        next.detail.activitiesPaging.pageSize = size;
-      });
-      fillViewport();
-    };
-    updatePageSize();
-    const observer = new ResizeObserver(updatePageSize);
+    const observer = new ResizeObserver(ensureBuffers);
     observer.observe(element);
-    window.addEventListener("resize", updatePageSize);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", updatePageSize);
-    };
-  }, [core, core.state.detail.activities.length]);
-
-  // 每次窗口内容变化后补拉一次：补拉结果会再次触发本副作用，直到填满可视区或没有更早的活动。
-  // 失败时（内容不变）不会重试，避免请求风暴，留待下一次滚动或刷新节拍。
-  useEffect(() => {
-    fillViewport();
-  }, [core, activities]);
+    return () => observer.disconnect();
+  }, [
+    core,
+    activities,
+    paging.hasNewer,
+    paging.hasOlder,
+    paging.loadingNewer,
+    paging.loadingOlder,
+  ]);
 
   const handleScroll = () => {
     const element = scrollRef.current;
     if (element === null) return;
     followingBottom.current =
       element.scrollHeight - element.scrollTop - element.clientHeight <= 1;
-    const paging = core.state.detail.activitiesPaging;
-    const pageSize = pageSizeForViewport(
-      element.clientHeight,
-      element.scrollHeight,
-      core.state.detail.activities.length,
-    );
-    if (pageSize !== paging.pageSize) {
-      core.update((next) => {
-        next.detail.activitiesPaging.pageSize = pageSize;
-      });
-    }
-    const nearOlderEdge = element.scrollTop <= EDGE_THRESHOLD;
-    const nearNewerEdge =
-      element.scrollHeight - element.scrollTop - element.clientHeight <= EDGE_THRESHOLD;
-    if (nearOlderEdge && paging.hasOlder && !paging.loadingOlder) {
-      void loadOlderActivities(core);
-    }
-    if (nearNewerEdge && paging.hasNewer && !paging.loadingNewer) {
-      void loadNewerActivities(core);
-    }
+    ensureBuffers();
   };
 
   const toggle = (id: string) => {

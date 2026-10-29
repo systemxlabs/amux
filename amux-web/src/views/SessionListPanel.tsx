@@ -1,7 +1,7 @@
 // 会话列表视图（docs/PRD.md「会话列表视图」、docs/DESIGN.md「会话列表视图」）。
 //
 // 顶部「+」进入新建会话视图；置顶会话在前，其余会话按创建时间倒序，
-// 工作流/群聊会话可展开关联普通会话；未归属会话区域滚到最下方时加载更早一页。
+// 工作流/群聊会话可展开关联普通会话；每个分组通过「显示更多」加载更早一页。
 
 import {
   Fragment,
@@ -10,7 +10,6 @@ import {
   useRef,
   useState,
   type ReactElement,
-  type UIEvent,
 } from "react";
 import {
   ChevronDown,
@@ -57,15 +56,10 @@ import {
 } from "../lib/types";
 import { cn } from "../lib/utils";
 
-/** 普通项目组首页 5 条，未归属会话首页 20 条（docs/PRD.md「会话列表视图」）。 */
-const PROJECT_GROUP_PAGE = 5;
-const UNASSIGNED_GROUP_PAGE = 20;
+/** 普通项目组和未归属会话均默认展示 5 条非置顶会话（docs/PRD.md「会话列表视图」）。 */
+const GROUP_PAGE = 5;
 
 type LoadGroupOptions = { background?: boolean };
-
-function projectPageSize(project: string | undefined): number {
-  return project === undefined ? UNASSIGNED_GROUP_PAGE : PROJECT_GROUP_PAGE;
-}
 
 /**
  * `onNavigate`：窄视口下会话列表在抽屉浮层里，选中会话或新建会话后要收起它，
@@ -184,17 +178,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
 
   const showMore = (group: { key: string; project: string | undefined }): void => {
     const current = groupData[group.key];
-    const page = projectPageSize(group.project);
-    void loadGroup(group.key, group.project, (current?.loaded ?? page) + page);
-  };
-
-  /** 未归属会话区域滚到列表底部时加载下一页；普通项目组仍由「显示更多」推进。 */
-  const handleScroll = (event: UIEvent<HTMLDivElement>): void => {
-    const node = event.currentTarget;
-    if (node.scrollTop + node.clientHeight < node.scrollHeight - 8) return;
-    const current = groupData["project:"];
-    if (current === undefined || current.loading || !current.hasMore) return;
-    void loadGroup("project:", undefined, current.loaded + 20);
+    void loadGroup(group.key, group.project, (current?.loaded ?? GROUP_PAGE) + GROUP_PAGE);
   };
 
   const renderRow = (row: ListRow): ReactElement => {
@@ -436,7 +420,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
       void loadGroup(
         group.key,
         group.project,
-        loadedCountsRef.current[group.key] ?? projectPageSize(group.project),
+        loadedCountsRef.current[group.key] ?? GROUP_PAGE,
         { background },
       );
     }
@@ -463,6 +447,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
   const unassignedData = groupData["project:"];
   const unassignedRows = listRows(unassignedData?.entries ?? [], new Set(state.expanded));
   const unassignedLoading = unassignedData?.loading ?? true;
+  const unassignedHasMore = unassignedData?.hasMore ?? false;
   const hasProjects = state.settings.projects.length > 0;
   const showUnassigned = hasProjects || unassignedLoading || unassignedRows.length > 0;
 
@@ -486,7 +471,6 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
       <div
         data-slot="session-list"
         className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-2"
-        onScroll={handleScroll}
       >
         {visibleProjectGroups.length === 0 && !showUnassigned ? (
           <p className="py-4 text-center text-sm text-muted-foreground">暂无会话</p>
@@ -572,6 +556,16 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                 })}
                 {unassignedLoading && unassignedRows.length > 0 ? (
                   <p className="px-2 py-1 text-center text-xs text-muted-foreground">加载中…</p>
+                ) : null}
+                {!unassignedLoading && unassignedHasMore ? (
+                  <button
+                    type="button"
+                    data-slot="session-show-more"
+                    onClick={() => showMore({ key: "project:", project: undefined })}
+                    className="cursor-pointer rounded-md px-2 py-1 text-center text-xs text-muted-foreground hover:bg-accent"
+                  >
+                    显示更多
+                  </button>
                 ) : null}
               </div>
             ) : null}

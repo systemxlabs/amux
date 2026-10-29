@@ -55,7 +55,7 @@ export function buildListWindow(
 
 /**
  * 项目组窗口：置顶项全部保留，非置顶项按创建时间合并后截断为项目组的可见条数。
- * 未归属组与普通项目组使用不同的 limit（docs/PRD.md「会话列表视图」）。
+ * 普通项目组与未归属会话均按固定条数追加（docs/PRD.md「会话列表视图」）。
  */
 export function buildProjectGroupWindow(
   sessions: readonly Session[],

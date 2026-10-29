@@ -1,15 +1,13 @@
-// 列表分页窗口：按滚动位置保留一段连续窗口，预取相邻页，页大小随面板可视高度自适应
-// （docs/DESIGN.md「会话列表滚动机制」「对话滚动机制」「活动列表滚动机制」）。
+// 列表分页窗口：按滚动位置保留一段连续窗口，预取相邻页
+// （docs/DESIGN.md「对话滚动机制」「活动列表滚动机制」）。
 
-/** 默认页大小：面板可视高度能容纳的条目数由视图计算并写入，初值取它。 */
+/** 固定页大小：不随条目高度或可视区大小变化。 */
 export const DEFAULT_PAGE_SIZE = 20;
-/** 页大小上限：面板很高时不至于一次拉取过多。 */
-export const MAX_PAGE_SIZE = 200;
 /** 一次刷新/窗口最多保留的条目数（服务端单次分页上限 500）。 */
 export const MAX_WINDOW_ITEMS = 500;
 
 export type Paging = {
-  /** 面板可视高度能容纳的条目数，由视图按滚动容器计算并写入 */
+  /** 每次请求服务端时使用的固定条数 */
   pageSize: number;
   /** 已加载窗口中最老一项的服务端偏移（空窗口为 0） */
   oldestOffset: number;
@@ -41,24 +39,6 @@ export function newPaging(): Paging {
     loadingNewer: false,
     shift: null,
   };
-}
-
-/**
- * 页大小：面板可视高度大致能容纳的条目数（内容高度按已加载条目均摊）。
- *
- * 内容未溢满视口时无法据此估算行高：比值会退化成「已加载条数」，页大小随之被压到 1，
- * 刷新窗口（按页大小重新拉取并替换）就会丢掉更早的已加载条目，因此此时保持默认页大小。
- */
-export function pageSizeForViewport(
-  viewportHeight: number,
-  contentHeight: number,
-  loaded: number,
-): number {
-  if (loaded === 0 || viewportHeight <= 0 || contentHeight <= 0 || contentHeight <= viewportHeight) {
-    return DEFAULT_PAGE_SIZE;
-  }
-  const visible = Math.round(viewportHeight / (contentHeight / loaded));
-  return Math.min(Math.max(visible, 1), MAX_PAGE_SIZE);
 }
 
 /** 刷新窗口上限：最多覆盖 MAX_WINDOW_ITEMS 条，避免拉取量随已加载数量无限增长。 */
