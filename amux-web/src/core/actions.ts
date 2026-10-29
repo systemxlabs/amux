@@ -185,6 +185,26 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
   await Promise.all([markRead(core, target), refreshInteraction(core), tick(core)]);
 }
 
+/** 按会话 ID 拉取最新详情并打开；用于运行记录等可能不在列表缓存中的入口。 */
+export async function openTargetById(core: Core, target: OpenTarget): Promise<void> {
+  const client = core.client;
+  if (client === null) return;
+  try {
+    if (target.kind === "session") {
+      const session = await client.session(target.id);
+      await openEntry(core, { kind: "session", session });
+    } else if (target.kind === "workflow") {
+      const workflow = await client.workflow(target.id);
+      await openEntry(core, { kind: "workflow", workflow });
+    } else {
+      const group = await client.group(target.id);
+      await openEntry(core, { kind: "group", group });
+    }
+  } catch (error) {
+    core.failure(`打开会话失败：${messageOf(error)}`);
+  }
+}
+
 /** 打开自动化列表，并清空当前会话视图状态。 */
 export async function showAutomations(core: Core): Promise<void> {
   core.update((state) => {

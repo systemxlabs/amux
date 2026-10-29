@@ -22,6 +22,7 @@ import {
   deleteRecentWorkspace,
   deleteProject,
   openEntry,
+  openTargetById,
   openTerminal,
   retryAttachment,
   sendPrompt,
@@ -415,6 +416,48 @@ describe("openEntry", () => {
     await openEntry(core, sessionEntry);
 
     expect(core.state.sidePanel).toBe("plan");
+  });
+});
+
+describe("openTargetById", () => {
+  function client(): ApiClient {
+    const noop = async (): Promise<void> => {};
+    return {
+      session: async (id: string) => ({ ...session(), id }),
+      workflow: async (id: string) => ({ ...workflow(), id }),
+      group: async (id: string) => ({ ...group(), id }),
+      readSession: noop,
+      readWorkflow: noop,
+      readGroup: noop,
+      machines: async () => [],
+      orchestrator: async () => null,
+      quickCommands: async () => [],
+      configOptions: async () => [],
+      slashCommands: async () => [],
+      sessionUsage: async () => null,
+      workflowUsage: async () => null,
+      sessions: async (): Promise<SessionList> => ({ sessions: [], hasMore: false }),
+      workflows: async (): Promise<WorkflowList> => ({ workflows: [], hasMore: false }),
+      groups: async (): Promise<GroupList> => ({ groups: [], hasMore: false }),
+      history: async () => ({ items: [], hasMore: false }),
+      workflowHistory: async () => ({ items: [], hasMore: false }),
+      groupHistory: async () => ({ items: [], hasMore: false }),
+      ongoingActivity: async () => null,
+      workflowOngoingActivity: async () => null,
+    } as unknown as ApiClient;
+  }
+
+  it.each([
+    { target: { kind: "session" as const, id: "s1" } },
+    { target: { kind: "workflow" as const, id: "w1" } },
+    { target: { kind: "group" as const, id: "g1" } },
+  ])("按 ID 拉取并打开 $target.kind", async ({ target }) => {
+    const core = new Core();
+    core.client = client();
+
+    await openTargetById(core, target);
+
+    expect(core.state.open).toEqual(target);
   });
 });
 

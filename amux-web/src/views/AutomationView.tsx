@@ -41,7 +41,7 @@ import { Textarea } from "../components/ui/textarea";
 import {
   closeAutomationPanel,
   deleteAutomation,
-  openEntry,
+  openTargetById,
   saveAutomation,
   showAutomationDetail,
   showEditAutomation,
@@ -325,7 +325,6 @@ export function AutomationPanelView() {
 
 function AutomationDetail({ automation }: { automation: Automation }) {
   const core = useCore();
-  const state = useCoreState();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const runsLoadingRef = useRef(false);
   const [editing, setEditing] = useState(false);
@@ -465,24 +464,13 @@ function AutomationDetail({ automation }: { automation: Automation }) {
               type="button"
               className="rounded-md border border-border px-3 py-2 text-left text-sm hover:bg-accent"
               onClick={() => {
-                const entry =
-                  run.sessionId !== undefined
-                    ? state.automationSessions
-                        .filter((session) => session.id === run.sessionId)
-                        .map((session) => ({ kind: "session" as const, session }))
-                        .at(0)
-                    : run.workflowId !== undefined
-                      ? state.automationWorkflows
-                          .filter((workflow) => workflow.id === run.workflowId)
-                          .map((workflow) => ({ kind: "workflow" as const, workflow }))
-                          .at(0)
-                      : run.groupId !== undefined
-                        ? state.automationGroups
-                            .filter((group) => group.id === run.groupId)
-                            .map((group) => ({ kind: "group" as const, group }))
-                            .at(0)
-                        : undefined;
-                if (entry !== undefined) void openEntry(core, entry);
+                if (run.sessionId !== undefined) {
+                  void openTargetById(core, { kind: "session", id: run.sessionId });
+                } else if (run.workflowId !== undefined) {
+                  void openTargetById(core, { kind: "workflow", id: run.workflowId });
+                } else if (run.groupId !== undefined) {
+                  void openTargetById(core, { kind: "group", id: run.groupId });
+                }
               }}
             >
               <div className="flex min-w-0 items-center gap-1 truncate">
