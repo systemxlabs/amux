@@ -286,11 +286,14 @@ pub struct TerminalResizeRequest {
 pub struct TerminalOutput {
     /// base64 编码的输出字节
     pub data: String,
-    /// 该事件之后终端输出流的字节偏移
+    /// 该事件在终端输出流中的序号
     pub next_cursor: u64,
     /// 客户端应重建本地输出缓冲（首个事件或流中发生断点）
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
+    /// 终端进程已退出；客户端应停止读取
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exited: bool,
 }
 
 /// 会话附件。
@@ -879,6 +882,7 @@ mod tests {
             data: "aGk=".into(),
             next_cursor: 3,
             truncated: false,
+            exited: false,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert!(json.get("truncated").is_none());

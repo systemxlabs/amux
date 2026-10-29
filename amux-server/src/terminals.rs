@@ -1,390 +1,147 @@
-//! 终端输出缓存（Server 侧）。
+//! 终端输出中转：Daemon 是终端元信息与输出缓冲的权威，Server 只维护
+//! 「订阅 ID → SSE 连接」并转发输出（docs/DESIGN.md「终端存储」）。
 //!
-//! Daemon 只推 PTY 字节流，Server 负责按会话缓存输出，并向 SSE 订阅者广播增量
-//! （docs/DESIGN.md「终端存储」「终端视图」）：缓存有上限，超限丢弃最早的输出；
-//! 订阅先取得缓存快照，再消费广播，保证两者之间不丢输出。
+//! Daemon 对每个订阅独立推送；attach 响应到达前可能已收到该订阅的输出，
+//! 先暂存，注册时补发。
 
-use std::collections::{HashMap, VecDeque};
-use std::convert::Infallible;
-use std::sync::Arc;
+use std::collections::HashMap;
 
-use amux_common::api::{Terminal, TerminalOutput, TerminalState};
-use base64::Engine as _;
-use futures_util::stream::{self, Stream};
+use amux_common::api::TerminalOutput;
+use amux_common::domain::TerminalOutputNotification;
 use parking_lot::Mutex;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 
-use crate::timestamps::now_ms;
+/// 单个 SSE 连接的中转队列上限；落后时断开，由客户端重连并重新 attach。
+const CHANNEL_CAPACITY: usize = 256;
+/// attach 响应到达前暂存的事件上限。
+const PENDING_LIMIT: usize = 4096;
 
-/// 单终端缓存上限（字节）。
-const BUFFER_LIMIT: usize = 256 * 1024;
-/// 单终端实时输出广播容量；订阅落后时从缓存快照恢复。
-const OUTPUT_CHANNEL_CAPACITY: usize = 64;
-
-/// 终端空闲删除阈值：超过该时长没有任何输入输出即删除（docs/DESIGN.md「终端存储」）。
-pub const IDLE_EXPIRE_MS: u64 = 24 * 60 * 60 * 1000;
-
-struct Entry {
-    session_id: String,
-    cwd: String,
-    cols: u16,
-    rows: u16,
-    state: TerminalState,
-    buffer: VecDeque<u8>,
-    /// buffer 首字节对应的流偏移
-    start: u64,
-    /// 已产生的总字节数（= 下次读取游标）
-    total: u64,
-    /// 最近一次输入或输出的时间（毫秒时间戳）
-    last_active: u64,
-    subscribers: broadcast::Sender<TerminalOutput>,
-}
-
-impl Entry {
-    /// Daemon 的初始输出可能先于 terminal.open 响应到达；先缓存，响应到达后再补全元信息。
-    fn pending() -> Self {
-        let (subscribers, _) = broadcast::channel(OUTPUT_CHANNEL_CAPACITY);
-        Self {
-            session_id: String::new(),
-            cwd: String::new(),
-            cols: 0,
-            rows: 0,
-            state: TerminalState::Running,
-            buffer: VecDeque::new(),
-            start: 0,
-            total: 0,
-            last_active: now_ms(),
-            subscribers,
-        }
-    }
+struct Subscription {
+    machine: String,
+    sender: mpsc::Sender<TerminalOutput>,
 }
 
 #[derive(Default)]
-pub struct TerminalCache {
-    terminals: Mutex<HashMap<String, Entry>>,
+pub struct TerminalRelay {
+    inner: Mutex<Inner>,
 }
 
-impl TerminalCache {
+#[derive(Default)]
+struct Inner {
+    subscriptions: HashMap<String, Subscription>,
+    pending: HashMap<String, Vec<TerminalOutput>>,
+}
+
+impl TerminalRelay {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn open(&self, session_id: &str, terminal_id: &str, cwd: &str, cols: u16, rows: u16) {
-        let mut terminals = self.terminals.lock();
-        if let Some(entry) = terminals.get_mut(terminal_id) {
-            if entry.session_id.is_empty() {
-                entry.session_id = session_id.to_string();
-                entry.cwd = cwd.to_string();
-                entry.cols = cols;
-                entry.rows = rows;
-                entry.state = TerminalState::Running;
-                entry.last_active = now_ms();
-                return;
+    /// Daemon 推送终端输出：按订阅转发；订阅尚未注册时暂存。
+    pub fn forward(&self, notification: TerminalOutputNotification) {
+        let output = TerminalOutput {
+            data: notification.data.unwrap_or_default(),
+            next_cursor: notification.sequence,
+            truncated: notification.truncated,
+            exited: notification.exit,
+        };
+        let mut inner = self.inner.lock();
+        if let Some(subscription) = inner.subscriptions.get(&notification.subscription_id) {
+            if subscription.sender.try_send(output).is_err() {
+                // 接收端落后或已断开：移除订阅，SSE 随之结束，客户端重连后重新 attach。
+                inner.subscriptions.remove(&notification.subscription_id);
             }
+            return;
         }
+        let pending = inner
+            .pending
+            .entry(notification.subscription_id)
+            .or_default();
+        if pending.len() < PENDING_LIMIT {
+            pending.push(output);
+        }
+    }
 
-        let (subscribers, _) = broadcast::channel(OUTPUT_CHANNEL_CAPACITY);
-        terminals.insert(
-            terminal_id.to_string(),
-            Entry {
-                session_id: session_id.to_string(),
-                cwd: cwd.to_string(),
-                cols,
-                rows,
-                state: TerminalState::Running,
-                buffer: VecDeque::new(),
-                start: 0,
-                total: 0,
-                last_active: now_ms(),
-                subscribers,
+    /// 注册订阅，返回注册前已收到的输出与实时接收端。
+    pub fn register(
+        &self,
+        subscription_id: &str,
+        machine: &str,
+    ) -> (Vec<TerminalOutput>, mpsc::Receiver<TerminalOutput>) {
+        let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
+        let mut inner = self.inner.lock();
+        let pending = inner.pending.remove(subscription_id).unwrap_or_default();
+        inner.subscriptions.insert(
+            subscription_id.to_string(),
+            Subscription {
+                machine: machine.to_string(),
+                sender,
             },
         );
+        (pending, receiver)
     }
 
-    pub fn output(&self, terminal_id: &str, data: &[u8]) {
-        let mut terminals = self.terminals.lock();
-        let entry = terminals
-            .entry(terminal_id.to_string())
-            .or_insert_with(Entry::pending);
-        entry.buffer.extend(data.iter().copied());
-        entry.total += data.len() as u64;
-        entry.last_active = now_ms();
-        while entry.buffer.len() > BUFFER_LIMIT {
-            entry.buffer.pop_front();
-            entry.start += 1;
-        }
-        let _ = entry.subscribers.send(TerminalOutput {
-            data: base64::engine::general_purpose::STANDARD.encode(data),
-            next_cursor: entry.total,
-            truncated: false,
-        });
+    pub fn unregister(&self, subscription_id: &str) {
+        self.inner.lock().subscriptions.remove(subscription_id);
+        self.inner.lock().pending.remove(subscription_id);
     }
 
-    /// 记录一次输入（终端空闲删除以「最近一次输入或输出」为基准）。
-    pub fn touch(&self, terminal_id: &str) {
-        if let Some(entry) = self.terminals.lock().get_mut(terminal_id) {
-            entry.last_active = now_ms();
-        }
-    }
-
-    pub fn exit(&self, terminal_id: &str) {
-        if let Some(entry) = self.terminals.lock().get_mut(terminal_id) {
-            entry.state = TerminalState::Exited;
-            entry.last_active = now_ms();
-        }
-    }
-
-    pub fn resize(&self, terminal_id: &str, cols: u16, rows: u16) {
-        if let Some(entry) = self.terminals.lock().get_mut(terminal_id) {
-            entry.cols = cols;
-            entry.rows = rows;
-            entry.last_active = now_ms();
-        }
-    }
-
-    /// 删除超过 `expire_ms` 没有输入输出的终端，返回被删终端的（会话 id, 终端 id）。
-    pub fn sweep_idle(&self, now: u64, expire_ms: u64) -> Vec<(String, String)> {
-        let mut terminals = self.terminals.lock();
-        let mut expired: Vec<String> = terminals
-            .iter()
-            .filter(|(_, entry)| now.saturating_sub(entry.last_active) > expire_ms)
-            .map(|(id, _)| id.clone())
-            .collect();
-        expired.sort();
-        expired
-            .into_iter()
-            .filter_map(|id| terminals.remove(&id).map(|entry| (entry.session_id, id)))
-            .collect()
-    }
-
-    /// 读取游标之后的增量输出。
-    fn read(&self, terminal_id: &str, cursor: Option<u64>) -> Option<TerminalOutput> {
-        let terminals = self.terminals.lock();
-        let entry = terminals.get(terminal_id)?;
-        Some(terminal_output(entry, cursor.unwrap_or(0)))
-    }
-
-    /// 订阅终端输出：先固定缓存快照，再从该时刻继续接收实时增量。
-    pub fn subscribe(self: &Arc<Self>, terminal_id: &str) -> Option<TerminalSubscription> {
-        let terminals = self.terminals.lock();
-        let entry = terminals.get(terminal_id)?;
-        let initial = terminal_output(entry, 0);
-        let receiver = entry.subscribers.subscribe();
-        Some(TerminalSubscription {
-            cache: Arc::clone(self),
-            terminal_id: terminal_id.to_string(),
-            initial: Some(initial),
-            receiver,
-        })
-    }
-
-    pub fn list(&self, session_id: &str) -> Vec<Terminal> {
-        let terminals = self.terminals.lock();
-        let mut list: Vec<Terminal> = terminals
-            .iter()
-            .filter(|(_, entry)| entry.session_id == session_id)
-            .map(|(id, entry)| Terminal {
-                id: id.clone(),
-                cwd: entry.cwd.clone(),
-                cols: entry.cols,
-                rows: entry.rows,
-                state: entry.state,
-            })
-            .collect();
-        list.sort_by(|a, b| a.id.cmp(&b.id));
-        list
-    }
-
-    pub fn contains(&self, terminal_id: &str) -> bool {
-        self.terminals.lock().contains_key(terminal_id)
-    }
-
-    pub fn remove(&self, terminal_id: &str) {
-        self.terminals.lock().remove(terminal_id);
-    }
-
-    /// 会话删除：释放其全部终端缓存，返回需要通知 Daemon 关闭的终端 id。
-    pub fn remove_session(&self, session_id: &str) -> Vec<String> {
-        let mut terminals = self.terminals.lock();
-        let ids: Vec<String> = terminals
-            .iter()
-            .filter(|(_, entry)| entry.session_id == session_id)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &ids {
-            terminals.remove(id);
-        }
-        ids
-    }
-}
-
-/// 一次 SSE 订阅：首个事件是当前缓存快照，后续事件是实时增量。
-pub struct TerminalSubscription {
-    cache: Arc<TerminalCache>,
-    terminal_id: String,
-    initial: Option<TerminalOutput>,
-    receiver: broadcast::Receiver<TerminalOutput>,
-}
-
-impl TerminalSubscription {
-    pub fn into_stream(self) -> impl Stream<Item = Result<TerminalOutput, Infallible>> + Send {
-        stream::unfold(self, |mut subscription| async move {
-            if let Some(initial) = subscription.initial.take() {
-                return Some((Ok(initial), subscription));
-            }
-            match subscription.receiver.recv().await {
-                Ok(output) => Some((Ok(output), subscription)),
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let mut output = subscription.cache.read(&subscription.terminal_id, None)?;
-                    // 广播队列落后：快照取代客户端当前缓冲；后续队列中的重复事件由游标过滤。
-                    output.truncated = true;
-                    Some((Ok(output), subscription))
-                }
-                Err(broadcast::error::RecvError::Closed) => None,
-            }
-        })
-    }
-}
-
-fn terminal_output(entry: &Entry, requested: u64) -> TerminalOutput {
-    let truncated = requested < entry.start;
-    let from = requested.max(entry.start);
-    let skip = (from - entry.start) as usize;
-    let bytes: Vec<u8> = entry.buffer.iter().skip(skip).copied().collect();
-    TerminalOutput {
-        data: base64::engine::general_purpose::STANDARD.encode(bytes),
-        next_cursor: entry.total,
-        truncated,
+    /// Daemon 断线：结束该机器的全部 SSE 订阅。
+    pub fn clear_machine(&self, machine: &str) {
+        self.inner
+            .lock()
+            .subscriptions
+            .retain(|_, subscription| subscription.machine != machine);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::StreamExt as _;
 
-    fn decoded(output: &TerminalOutput) -> String {
-        String::from_utf8(
-            base64::engine::general_purpose::STANDARD
-                .decode(&output.data)
-                .unwrap(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn reads_incremental_output_by_cursor() {
-        let cache = TerminalCache::new();
-        cache.open("s1", "t1", "/w", 80, 24);
-        cache.output("t1", b"hello ");
-        cache.output("t1", b"world");
-
-        let first = cache.read("t1", None).unwrap();
-        assert_eq!(decoded(&first), "hello world");
-        assert_eq!(first.next_cursor, 11);
-        assert!(!first.truncated);
-
-        // 游标之后的增量
-        let second = cache.read("t1", Some(6)).unwrap();
-        assert_eq!(decoded(&second), "world");
-
-        let empty = cache.read("t1", Some(11)).unwrap();
-        assert_eq!(decoded(&empty), "");
-    }
-
-    #[test]
-    fn cursor_before_buffer_start_reports_truncated() {
-        let cache = TerminalCache::new();
-        cache.open("s1", "t1", "/w", 80, 24);
-        let chunk = vec![b'x'; 1024];
-        for _ in 0..(BUFFER_LIMIT / 1024 + 4) {
-            cache.output("t1", &chunk);
+    fn notification(id: &str, sequence: u64, data: &str) -> TerminalOutputNotification {
+        TerminalOutputNotification {
+            subscription_id: id.into(),
+            sequence,
+            data: Some(data.into()),
+            exit: false,
+            truncated: false,
         }
-        let output = cache.read("t1", Some(0)).unwrap();
-        assert!(output.truncated, "旧输出已被丢弃时应标记 truncated");
-        assert_eq!(output.next_cursor, (BUFFER_LIMIT + 4096) as u64);
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&output.data)
-            .unwrap();
-        assert_eq!(bytes.len(), BUFFER_LIMIT);
-    }
-
-    #[test]
-    fn initial_output_before_open_response_is_retained() {
-        let cache = TerminalCache::new();
-        cache.output("t1", b"prompt$ ");
-        assert!(cache.list("s1").is_empty());
-
-        cache.open("s1", "t1", "/w", 80, 24);
-
-        let output = cache.read("t1", None).unwrap();
-        assert_eq!(decoded(&output), "prompt$ ");
-        assert_eq!(cache.list("s1")[0].cwd, "/w");
     }
 
     #[tokio::test]
-    async fn subscription_returns_snapshot_then_live_output() {
-        let cache = Arc::new(TerminalCache::new());
-        cache.open("s1", "t1", "/w", 80, 24);
-        cache.output("t1", b"before");
+    async fn pending_events_are_delivered_on_register() {
+        let relay = TerminalRelay::new();
+        relay.forward(notification("s1", 0, "hello"));
+        relay.forward(notification("s1", 1, " world"));
 
-        let mut stream = Box::pin(cache.subscribe("t1").unwrap().into_stream());
-        let snapshot = stream.next().await.unwrap().unwrap();
-        assert_eq!(decoded(&snapshot), "before");
-        assert!(!snapshot.truncated);
-
-        cache.output("t1", b" after");
-        let live = stream.next().await.unwrap().unwrap();
-        assert_eq!(decoded(&live), " after");
-        assert_eq!(live.next_cursor, 12);
+        let (pending, mut receiver) = relay.register("s1", "m1");
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].next_cursor, 0);
+        assert_eq!(pending[1].next_cursor, 1);
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]
-    async fn lagged_subscription_recovers_with_full_snapshot() {
-        let cache = Arc::new(TerminalCache::new());
-        cache.open("s1", "t1", "/w", 80, 24);
-        let mut stream = Box::pin(cache.subscribe("t1").unwrap().into_stream());
-        assert_eq!(decoded(&stream.next().await.unwrap().unwrap()), "");
-
-        for _ in 0..=OUTPUT_CHANNEL_CAPACITY {
-            cache.output("t1", b"x");
-        }
-        let recovered = stream.next().await.unwrap().unwrap();
-        assert!(recovered.truncated);
-        assert_eq!(decoded(&recovered), "x".repeat(OUTPUT_CHANNEL_CAPACITY + 1));
+    async fn live_events_are_forwarded_after_register() {
+        let relay = TerminalRelay::new();
+        let (_, mut receiver) = relay.register("s1", "m1");
+        relay.forward(notification("s1", 2, "live"));
+        let output = receiver.recv().await.unwrap();
+        assert_eq!(output.data, "live");
+        assert_eq!(output.next_cursor, 2);
     }
 
     #[test]
-    fn exit_marks_state_and_session_removal_collects_ids() {
-        let cache = TerminalCache::new();
-        cache.open("s1", "t1", "/w", 80, 24);
-        cache.open("s2", "t2", "/w", 80, 24);
-        cache.exit("t1");
-        assert_eq!(cache.list("s1")[0].state, TerminalState::Exited);
-        assert_eq!(cache.remove_session("s1"), ["t1"]);
-        assert!(!cache.contains("t1"));
-        assert!(cache.contains("t2"));
-    }
-
-    /// 超过阈值没有输入输出的终端被删除；期间有输入输出的保留。
-    #[test]
-    fn sweep_idle_removes_only_expired_terminals() {
-        let cache = TerminalCache::new();
-        let opened_at = now_ms();
-        cache.open("s1", "idle", "/w", 80, 24);
-        cache.open("s1", "used", "/w", 80, 24);
-        // 等毫秒时钟前进后再让 used 有一次输入：两者的活跃时间因此相差 2ms
-        while now_ms() < opened_at + 2 {}
-        cache.touch("used");
-
-        // idle 的年龄是 阈值+2，used 恰好是阈值：只删 idle
-        let removed = cache.sweep_idle(opened_at + 2 + IDLE_EXPIRE_MS, IDLE_EXPIRE_MS);
-        assert_eq!(removed, [("s1".to_string(), "idle".to_string())]);
-        assert!(cache.contains("used"), "刚有输入的终端不应被删除");
-
-        // used 之后再无输入输出，到点同样被删除
-        let removed = cache.sweep_idle(opened_at + 2 + IDLE_EXPIRE_MS * 2, IDLE_EXPIRE_MS);
-        assert_eq!(removed, [("s1".to_string(), "used".to_string())]);
-        assert!(!cache.contains("used"));
+    fn clear_machine_drops_its_subscriptions() {
+        let relay = TerminalRelay::new();
+        let _receiver_1 = relay.register("s1", "m1").1;
+        let _receiver_2 = relay.register("s2", "m2").1;
+        relay.clear_machine("m1");
+        relay.forward(notification("s1", 0, "x"));
+        relay.forward(notification("s2", 0, "y"));
+        let inner = relay.inner.lock();
+        assert!(inner.pending.contains_key("s1"));
+        assert!(!inner.pending.contains_key("s2"));
     }
 }

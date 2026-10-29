@@ -469,10 +469,11 @@ pub struct FsReadResult {
     pub next_offset: usize,
 }
 
-/// `terminal.open` 参数：cwd 与初始行列（避免全屏程序以默认尺寸先渲染）。
+/// `terminal.open` 参数：所属会话、cwd 与初始行列（避免全屏程序以默认尺寸先渲染）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOpenParams {
+    pub session_id: String,
     pub cwd: String,
     pub cols: u16,
     pub rows: u16,
@@ -485,10 +486,62 @@ pub struct TerminalOpenResult {
     pub terminal_id: String,
 }
 
+/// `terminal.attach` 参数：订阅指定会话下的终端。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalAttachParams {
+    pub session_id: String,
+    pub terminal_id: String,
+}
+
+/// `terminal.attach` 结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalAttachResult {
+    pub subscription_id: String,
+}
+
+/// `terminal.detach` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalDetachParams {
+    pub subscription_id: String,
+}
+
+/// `terminal.list` 参数；`session_id` 为空时返回全部终端。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// 终端元信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalInfo {
+    pub terminal_id: String,
+    pub session_id: String,
+    pub cwd: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub state: crate::api::TerminalState,
+    /// 已产生的输出块数量（下一个输出块的序号）
+    pub sequence: u64,
+}
+
+/// `terminal.list` 结果。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalListResult {
+    pub terminals: Vec<TerminalInfo>,
+}
+
 /// `terminal.resize` 参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalResizeParams {
+    pub session_id: String,
     pub terminal_id: String,
     pub cols: u16,
     pub rows: u16,
@@ -498,6 +551,7 @@ pub struct TerminalResizeParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalInputParams {
+    pub session_id: String,
     pub terminal_id: String,
     pub data: String,
 }
@@ -506,22 +560,25 @@ pub struct TerminalInputParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalIdParams {
+    pub session_id: String,
     pub terminal_id: String,
 }
 
-/// `terminal.output` 通知负载。data 为 base64 编码的 PTY 输出字节。
+/// `terminal.output` 通知负载。每个订阅独立推送，`exit` 为真时表示进程退出。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOutputNotification {
-    pub terminal_id: String,
-    pub data: String,
-}
-
-/// `terminal.exit` 通知负载。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalExitNotification {
-    pub terminal_id: String,
+    pub subscription_id: String,
+    /// 该输出块的序号，按终端从零自增
+    pub sequence: u64,
+    /// base64 编码的输出字节；exit 事件为空
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[serde(default)]
+    pub exit: bool,
+    /// 订阅快照的首块：缓冲已丢弃更早的输出
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// 管理类操作的通用结果。
@@ -649,12 +706,17 @@ mod tests {
     #[test]
     fn terminal_output_notification_shape() {
         let notification = TerminalOutputNotification {
-            terminal_id: "t1".into(),
-            data: "aGk=".into(),
+            subscription_id: "sub1".into(),
+            sequence: 3,
+            data: Some("aGk=".into()),
+            exit: false,
+            truncated: false,
         };
         let json = serde_json::to_value(&notification).unwrap();
-        assert_eq!(json["terminalId"], "t1");
+        assert_eq!(json["subscriptionId"], "sub1");
+        assert_eq!(json["sequence"], 3);
         assert_eq!(json["data"], "aGk=");
+        assert!(json.get("exit").is_some());
     }
 
     #[test]

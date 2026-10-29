@@ -1,37 +1,68 @@
-//! 终端：PTY 子进程与输出泵。
+//! 终端：PTY 子进程、输出环形缓冲与订阅。
 //!
-//! 终端归属普通会话（由 Server 决定生命周期），Daemon 只负责 PTY 与字节流转发：
-//! - 输入：Server 下行的 base64 字节写入 PTY master
-//! - 输出：PTY master 读线程 → 异步输出泵 → `terminal.output` 通知（base64）
-//! - 进程退出：`terminal.exit` 通知，并摘除条目
-//!
-//! 输出帧进入 [`crate::outbox::Outbox`]：与 Server 断线期间输出仍在缓存中累积，
-//! 重连后补发（docs/DESIGN.md「断线重连」）。
+//! Daemon 是终端元信息与输出缓冲的权威（docs/DESIGN.md「终端存储」）：
+//! - 终端归属普通会话，输出按终端维护从零自增的序号
+//! - 每个订阅独立推送，订阅者从环形缓冲起点开始接收
+//! - 进程退出以 `terminal.output` 的 exit 事件通知每个订阅
+//! - 超过 1 天没有输入输出的终端自动删除
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::Arc;
 
+use amux_common::api::TerminalState;
 use amux_common::daemon::notify;
 use amux_common::domain::{
-    TerminalExitNotification, TerminalIdParams, TerminalInputParams, TerminalOpenParams,
+    TerminalAttachParams, TerminalAttachResult, TerminalDetachParams, TerminalIdParams,
+    TerminalInfo, TerminalInputParams, TerminalListParams, TerminalListResult, TerminalOpenParams,
     TerminalOutputNotification, TerminalResizeParams,
 };
 use base64::Engine as _;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use tokio::sync::mpsc;
 
 use crate::frames;
 use crate::outbox::Outbox;
 use crate::rpc::{RpcError, RpcResult};
 
-#[derive(Clone)]
+/// 每个终端的输出环形缓冲上限。
+const BUFFER_LIMIT: usize = 256 * 1024;
+/// 终端空闲多久后自动删除。
+const IDLE_EXPIRE_MS: u64 = 24 * 60 * 60 * 1000;
+
+struct Block {
+    sequence: u64,
+    data: Arc<Vec<u8>>,
+}
+
+struct TerminalEvent {
+    sequence: u64,
+    data: Option<Arc<Vec<u8>>>,
+    exit: bool,
+    truncated: bool,
+}
+
 struct TerminalHandle {
+    session_id: String,
+    cwd: String,
+    cols: u16,
+    rows: u16,
+    state: TerminalState,
+    last_active: u64,
     /// 输入字节流送专职写线程：PTY master write 可能阻塞，不能占用分发任务
     input_tx: std::sync::mpsc::Sender<Vec<u8>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
     wait_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    buffer: VecDeque<Block>,
+    buffered_bytes: usize,
+    /// 环形缓冲首块的序号；大于 0 表示更早的输出已被丢弃
+    start_seq: u64,
+    /// 下一个输出块的序号
+    next_seq: u64,
+    exit_seq: Option<u64>,
+    subscriptions: HashMap<String, mpsc::UnboundedSender<TerminalEvent>>,
 }
 
 pub struct TerminalRegistry {
@@ -55,6 +86,13 @@ fn stop_terminal(
     }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 impl TerminalRegistry {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -63,12 +101,13 @@ impl TerminalRegistry {
     }
 
     /// 打开终端：spawn PTY shell 并注册输出泵。
-    pub fn open(
-        self: &Arc<Self>,
-        params: TerminalOpenParams,
-        outbox: Arc<Outbox>,
-    ) -> Result<String, RpcError> {
-        let TerminalOpenParams { cwd, cols, rows } = params;
+    pub fn open(self: &Arc<Self>, params: TerminalOpenParams) -> Result<String, RpcError> {
+        let TerminalOpenParams {
+            session_id,
+            cwd,
+            cols,
+            rows,
+        } = params;
         if cols == 0 || rows == 0 {
             return Err(RpcError::invalid_params("终端行列必须为正"));
         }
@@ -182,18 +221,31 @@ impl TerminalRegistry {
             return Err(RpcError::internal(format!("输出线程启动失败: {e}")));
         }
 
+        let now = now_ms();
         self.terminals.lock().insert(
             terminal_id.clone(),
             TerminalHandle {
+                session_id,
+                cwd: cwd.clone(),
+                cols,
+                rows,
+                state: TerminalState::Running,
+                last_active: now,
                 input_tx,
                 master: Arc::new(Mutex::new(pty.master)),
                 killer,
                 wait_thread,
+                buffer: VecDeque::new(),
+                buffered_bytes: 0,
+                start_seq: 0,
+                next_seq: 0,
+                exit_seq: None,
+                subscriptions: HashMap::new(),
             },
         );
         log::info!("终端已打开: terminal={terminal_id} cwd={cwd} cols={cols} rows={rows}");
 
-        // 输出泵：PTY 字节 → base64 → 出站缓存。进程退出后发 exit 通知并回收条目。
+        // 输出泵：PTY 字节 → 环形缓冲 → 每个订阅独立推送。
         let this = Arc::clone(self);
         let pump_id = terminal_id.clone();
         tokio::spawn(async move {
@@ -203,34 +255,185 @@ impl TerminalRegistry {
                     eof = true;
                     break;
                 }
-                let payload = TerminalOutputNotification {
-                    terminal_id: pump_id.clone(),
-                    data: base64::engine::general_purpose::STANDARD.encode(&chunk),
-                };
-                outbox.push(frames::notification(notify::TERMINAL_OUTPUT, &payload));
+                this.publish_output(&pump_id, chunk);
             }
             if eof {
-                // 先摘除条目再发退出通知：收到 terminal.exit 后的操作不会短暂成功
-                this.terminals.lock().remove(&pump_id);
-                outbox.push(frames::notification(
-                    notify::TERMINAL_EXIT,
-                    &TerminalExitNotification {
-                        terminal_id: pump_id.clone(),
-                    },
-                ));
-                log::info!("终端进程已退出: terminal={pump_id}");
+                this.publish_exit(&pump_id);
             }
         });
 
         Ok(terminal_id)
     }
+    /// 追加输出并推送给该终端的所有订阅。
+    fn publish_output(&self, terminal_id: &str, chunk: Vec<u8>) {
+        let data = Arc::new(chunk);
+        let mut terminals = self.terminals.lock();
+        let Some(handle) = terminals.get_mut(terminal_id) else {
+            return;
+        };
+        let sequence = handle.next_seq;
+        handle.next_seq += 1;
+        handle.last_active = now_ms();
+        handle.buffered_bytes += data.len();
+        handle.buffer.push_back(Block {
+            sequence,
+            data: Arc::clone(&data),
+        });
+        while handle.buffered_bytes > BUFFER_LIMIT {
+            let Some(block) = handle.buffer.pop_front() else {
+                break;
+            };
+            handle.buffered_bytes -= block.data.len();
+            handle.start_seq = block.sequence + 1;
+        }
+        for sender in handle.subscriptions.values() {
+            let _ = sender.send(TerminalEvent {
+                sequence,
+                data: Some(Arc::clone(&data)),
+                exit: false,
+                truncated: false,
+            });
+        }
+    }
+
+    /// 标记退出并向所有订阅推送 exit 事件；终端元信息与缓冲保留到清理。
+    fn publish_exit(&self, terminal_id: &str) {
+        let mut terminals = self.terminals.lock();
+        let Some(handle) = terminals.get_mut(terminal_id) else {
+            return;
+        };
+        if handle.state == TerminalState::Exited {
+            return;
+        }
+        let sequence = handle.next_seq;
+        handle.next_seq += 1;
+        handle.exit_seq = Some(sequence);
+        handle.state = TerminalState::Exited;
+        handle.last_active = now_ms();
+        for sender in handle.subscriptions.values() {
+            let _ = sender.send(TerminalEvent {
+                sequence,
+                data: None,
+                exit: true,
+                truncated: false,
+            });
+        }
+        handle.subscriptions.clear();
+        log::info!("终端进程已退出: terminal={terminal_id}");
+    }
+
+    /// 订阅终端：先把环形缓冲从头推给该订阅，再接收实时输出。
+    pub fn attach(
+        self: &Arc<Self>,
+        params: TerminalAttachParams,
+        outbox: Arc<Outbox>,
+    ) -> RpcResult<TerminalAttachResult> {
+        let subscription_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = mpsc::unbounded_channel::<TerminalEvent>();
+        {
+            let mut terminals = self.terminals.lock();
+            let handle = terminals
+                .get_mut(&params.terminal_id)
+                .ok_or_else(not_found)?;
+            if handle.session_id != params.session_id {
+                return Err(not_found());
+            }
+            let truncated = handle.start_seq > 0;
+            let mut first = true;
+            for block in &handle.buffer {
+                let _ = tx.send(TerminalEvent {
+                    sequence: block.sequence,
+                    data: Some(Arc::clone(&block.data)),
+                    exit: false,
+                    truncated: first && truncated,
+                });
+                first = false;
+            }
+            if handle.state == TerminalState::Exited {
+                let sequence = handle
+                    .exit_seq
+                    .unwrap_or_else(|| handle.next_seq.saturating_sub(1));
+                let _ = tx.send(TerminalEvent {
+                    sequence,
+                    data: None,
+                    exit: true,
+                    truncated: false,
+                });
+            } else {
+                handle.subscriptions.insert(subscription_id.clone(), tx);
+            }
+        }
+        let forward_id = subscription_id.clone();
+        tokio::spawn(async move {
+            let mut rx = rx;
+            while let Some(event) = rx.recv().await {
+                let payload = TerminalOutputNotification {
+                    subscription_id: forward_id.clone(),
+                    sequence: event.sequence,
+                    data: event.data.map(|data| {
+                        base64::engine::general_purpose::STANDARD.encode(data.as_slice())
+                    }),
+                    exit: event.exit,
+                    truncated: event.truncated,
+                };
+                outbox.push(frames::notification(notify::TERMINAL_OUTPUT, &payload));
+            }
+        });
+        Ok(TerminalAttachResult { subscription_id })
+    }
+
+    /// 取消订阅；订阅已随终端退出或清理消失时视为成功。
+    pub fn detach(&self, params: TerminalDetachParams) -> RpcResult<()> {
+        let mut terminals = self.terminals.lock();
+        for handle in terminals.values_mut() {
+            if handle
+                .subscriptions
+                .remove(&params.subscription_id)
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn list(&self, params: TerminalListParams) -> TerminalListResult {
+        let terminals = self.terminals.lock();
+        let mut list: Vec<TerminalInfo> = terminals
+            .iter()
+            .filter(|(_, handle)| {
+                params
+                    .session_id
+                    .as_deref()
+                    .is_none_or(|session_id| handle.session_id == session_id)
+            })
+            .map(|(id, handle)| TerminalInfo {
+                terminal_id: id.clone(),
+                session_id: handle.session_id.clone(),
+                cwd: handle.cwd.clone(),
+                cols: handle.cols,
+                rows: handle.rows,
+                state: handle.state,
+                sequence: handle.next_seq,
+            })
+            .collect();
+        list.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+        TerminalListResult { terminals: list }
+    }
 
     /// 向终端写入输入字节流。
     pub fn input(&self, params: TerminalInputParams) -> RpcResult<()> {
-        let handle = self.entry(&params.terminal_id)?;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(params.data)
             .map_err(|e| RpcError::invalid_params(format!("输入不是合法 base64: {e}")))?;
+        let mut terminals = self.terminals.lock();
+        let handle = terminals
+            .get_mut(&params.terminal_id)
+            .ok_or_else(not_found)?;
+        if handle.session_id != params.session_id {
+            return Err(not_found());
+        }
+        handle.last_active = now_ms();
         handle
             .input_tx
             .send(bytes)
@@ -243,42 +446,99 @@ impl TerminalRegistry {
         if params.cols == 0 || params.rows == 0 {
             return Err(RpcError::invalid_params("终端行列必须为正"));
         }
-        let handle = self.entry(&params.terminal_id)?;
-        let master = handle.master.clone();
-        let master = master.lock();
-        master
+        let master = {
+            let mut terminals = self.terminals.lock();
+            let handle = terminals
+                .get_mut(&params.terminal_id)
+                .ok_or_else(not_found)?;
+            if handle.session_id != params.session_id {
+                return Err(not_found());
+            }
+            handle.cols = params.cols;
+            handle.rows = params.rows;
+            handle.last_active = now_ms();
+            Arc::clone(&handle.master)
+        };
+        let result = master
+            .lock()
             .resize(PtySize {
                 rows: params.rows,
                 cols: params.cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| RpcError::internal(format!("resize 失败: {e}")))
+            .map_err(|e| RpcError::internal(format!("resize 失败: {e}")));
+        result
     }
 
-    /// 关闭终端并回收 PTY。
+    /// 关闭终端并回收 PTY；不存在时视为成功。
     pub fn close(&self, params: TerminalIdParams) -> RpcResult<()> {
-        let handle = self
-            .terminals
-            .lock()
-            .remove(&params.terminal_id)
-            .ok_or_else(not_found)?;
-        stop_terminal(&handle.killer, &handle.wait_thread);
-        log::info!("终端已关闭: terminal={}", params.terminal_id);
+        let handle = {
+            let mut terminals = self.terminals.lock();
+            let Some(handle) = terminals.get(&params.terminal_id) else {
+                return Ok(());
+            };
+            if handle.session_id != params.session_id {
+                return Err(not_found());
+            }
+            terminals.remove(&params.terminal_id)
+        };
+        if let Some(handle) = handle {
+            let sequence = handle.next_seq;
+            for sender in handle.subscriptions.values() {
+                let _ = sender.send(TerminalEvent {
+                    sequence,
+                    data: None,
+                    exit: true,
+                    truncated: false,
+                });
+            }
+            stop_terminal(&handle.killer, &handle.wait_thread);
+            log::info!("终端已关闭: terminal={}", params.terminal_id);
+        }
         Ok(())
+    }
+
+    /// 删除超过 1 天没有输入输出的终端。
+    pub fn sweep_idle(&self) {
+        let now = now_ms();
+        let expired: Vec<String> = {
+            let terminals = self.terminals.lock();
+            terminals
+                .iter()
+                .filter(|(_, handle)| now.saturating_sub(handle.last_active) > IDLE_EXPIRE_MS)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for terminal_id in expired {
+            let handle = self.terminals.lock().remove(&terminal_id);
+            if let Some(handle) = handle {
+                let sequence = handle.next_seq;
+                for sender in handle.subscriptions.values() {
+                    let _ = sender.send(TerminalEvent {
+                        sequence,
+                        data: None,
+                        exit: true,
+                        truncated: false,
+                    });
+                }
+                stop_terminal(&handle.killer, &handle.wait_thread);
+                log::info!("终端长时间无输入输出，已删除: terminal={terminal_id}");
+            }
+        }
     }
 
     /// Daemon 退出时释放所有终端。
     pub fn shutdown_all(&self) {
-        let terminals: Vec<_> = self.terminals.lock().drain().map(|(_, h)| h).collect();
+        let terminals: Vec<_> = self
+            .terminals
+            .lock()
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect();
         for terminal in terminals {
             stop_terminal(&terminal.killer, &terminal.wait_thread);
         }
-    }
-
-    fn entry(&self, terminal_id: &str) -> RpcResult<TerminalHandle> {
-        let handle = self.terminals.lock().get(terminal_id).cloned();
-        handle.ok_or_else(not_found)
     }
 }
 
@@ -293,24 +553,134 @@ fn not_found() -> RpcError {
 mod tests {
     use super::*;
 
-    /// base64 往返（协议契约）：PTY 输出是任意字节，非 UTF-8 安全。
-    #[test]
-    fn base64_roundtrip() {
-        let raw: Vec<u8> = (0u8..=255).collect();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
-        assert_eq!(
-            base64::engine::general_purpose::STANDARD
-                .decode(&encoded)
-                .unwrap(),
-            raw
-        );
+    fn open_registry() -> (Arc<TerminalRegistry>, String) {
+        let registry = TerminalRegistry::new();
+        let terminal_id = registry
+            .open(TerminalOpenParams {
+                session_id: "s1".into(),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                cols: 80,
+                rows: 24,
+            })
+            .unwrap();
+        (registry, terminal_id)
     }
 
     #[tokio::test]
-    async fn missing_terminal_reports_not_found() {
+    async fn output_is_buffered_with_increasing_sequences() {
+        let (registry, terminal_id) = open_registry();
+        let before = registry
+            .list(TerminalListParams {
+                session_id: Some("s1".into()),
+            })
+            .terminals
+            .into_iter()
+            .find(|terminal| terminal.terminal_id == terminal_id)
+            .unwrap()
+            .sequence;
+        registry.publish_output(&terminal_id, b"hello ".to_vec());
+        registry.publish_output(&terminal_id, b"world".to_vec());
+
+        let terminal = registry
+            .list(TerminalListParams {
+                session_id: Some("s1".into()),
+            })
+            .terminals
+            .into_iter()
+            .find(|terminal| terminal.terminal_id == terminal_id)
+            .unwrap();
+        assert_eq!(terminal.sequence, before + 2);
+        assert_eq!(terminal.state, TerminalState::Running);
+        registry
+            .close(TerminalIdParams {
+                session_id: "s1".into(),
+                terminal_id,
+            })
+            .unwrap();
+    }
+
+    /// 订阅从环形缓冲起点开始推送，序号与终端维护的序号一致。
+    #[tokio::test]
+    async fn attach_streams_buffer_from_start() {
+        let (registry, terminal_id) = open_registry();
+        let start = registry
+            .list(TerminalListParams {
+                session_id: Some("s1".into()),
+            })
+            .terminals
+            .into_iter()
+            .find(|terminal| terminal.terminal_id == terminal_id)
+            .unwrap()
+            .sequence;
+        registry.publish_output(&terminal_id, b"hello".to_vec());
+
+        let outbox = Arc::new(Outbox::new());
+        let attach = registry
+            .attach(
+                TerminalAttachParams {
+                    session_id: "s1".into(),
+                    terminal_id: terminal_id.clone(),
+                },
+                Arc::clone(&outbox),
+            )
+            .unwrap();
+        let mut found = false;
+        for _ in 0..64 {
+            let (seq, frame) = outbox.peek().await;
+            outbox.ack(seq);
+            let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            let params = &value["params"];
+            if params["subscriptionId"].as_str() != Some(&attach.subscription_id) {
+                continue;
+            }
+            if params["data"].as_str() != Some("aGVsbG8=") {
+                continue;
+            }
+            assert!(params["sequence"].as_u64().unwrap() >= start);
+            found = true;
+            break;
+        }
+        assert!(found, "未收到订阅快照");
+        registry
+            .close(TerminalIdParams {
+                session_id: "s1".into(),
+                terminal_id,
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_session() {
+        let (registry, terminal_id) = open_registry();
+        assert_eq!(
+            registry
+                .list(TerminalListParams {
+                    session_id: Some("s1".into()),
+                })
+                .terminals
+                .len(),
+            1
+        );
+        assert!(registry
+            .list(TerminalListParams {
+                session_id: Some("s2".into()),
+            })
+            .terminals
+            .is_empty());
+        registry
+            .close(TerminalIdParams {
+                session_id: "s1".into(),
+                terminal_id,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn missing_terminal_reports_not_found() {
         let registry = TerminalRegistry::new();
         let error = registry
             .input(TerminalInputParams {
+                session_id: "s1".into(),
                 terminal_id: "nope".into(),
                 data: String::new(),
             })
@@ -319,5 +689,14 @@ mod tests {
             error.code,
             amux_common::jsonrpc::server_error::TERMINAL_NOT_FOUND
         );
+        assert!(registry
+            .attach(
+                TerminalAttachParams {
+                    session_id: "s1".into(),
+                    terminal_id: "nope".into(),
+                },
+                Arc::new(Outbox::new()),
+            )
+            .is_err());
     }
 }

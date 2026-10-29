@@ -8,6 +8,7 @@ use crate::config_store::ConfigStore;
 use crate::groups::GroupService;
 use crate::machines::MachineHub;
 use crate::sessions::SessionService;
+use crate::terminals::TerminalRelay;
 use crate::workflows::WorkflowService;
 
 pub struct AppState {
@@ -19,4 +20,5 @@ pub struct AppState {
     pub groups: Arc<GroupService>,
     pub automations: Arc<AutomationService>,
     pub attachments: Arc<AttachmentStore>,
+    pub terminals: Arc<TerminalRelay>,
 }

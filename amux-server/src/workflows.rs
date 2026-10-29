@@ -2087,11 +2087,11 @@ mod tests {
     }
 
     fn test_service(home: &std::path::Path) -> Arc<WorkflowService> {
-        use crate::terminals::TerminalCache;
+        use crate::terminals::TerminalRelay;
 
         let store = Arc::new(Store::open(home).unwrap());
         let config = Arc::new(ConfigStore::new(home.to_path_buf()));
-        let terminals = Arc::new(TerminalCache::new());
+        let terminals = Arc::new(TerminalRelay::new());
         let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
         let machines = MachineHub::new(
             "token".into(),
@@ -2102,7 +2102,6 @@ mod tests {
         let sessions = Arc::new(SessionService::new(
             Arc::clone(&store),
             machines.clone(),
-            terminals,
             Arc::clone(&config),
         ));
         Arc::new(WorkflowService::new(

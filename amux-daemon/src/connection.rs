@@ -14,8 +14,9 @@ use amux_common::daemon::{
     GitRepoParams, WorktreeListResult, WorktreePathParams, WorktreeResult,
 };
 use amux_common::domain::{
-    FsListParams, FsReadParams, OpResult, TerminalIdParams, TerminalInputParams,
-    TerminalOpenParams, TerminalOpenResult, TerminalResizeParams,
+    FsListParams, FsReadParams, OpResult, TerminalAttachParams, TerminalDetachParams,
+    TerminalIdParams, TerminalInputParams, TerminalListParams, TerminalOpenParams,
+    TerminalOpenResult, TerminalResizeParams,
 };
 use amux_common::jsonrpc::{JsonRpcNotification, JsonRpcRequest};
 use futures_util::stream::SplitStream;
@@ -63,6 +64,16 @@ pub async fn run(machine_name: String, server: String, token: String) -> Result<
         git: GitRunner::new(),
     });
     let outbox = Arc::new(Outbox::new());
+
+    // 终端空闲清理由持有 PTY 的 Daemon 执行（docs/DESIGN.md「终端存储」）。
+    let sweep_terminals = Arc::clone(&daemon.terminals);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(600));
+        loop {
+            ticker.tick().await;
+            sweep_terminals.sweep_idle();
+        }
+    });
 
     tokio::select! {
         _ = reconnect_loop(&server, &token, &daemon, &outbox) => log::info!("连接循环结束"),
@@ -361,8 +372,22 @@ async fn execute(
         }
         method::TERMINAL_OPEN => {
             let params: TerminalOpenParams = decode(params)?;
-            let terminal_id = daemon.terminals.open(params, Arc::clone(outbox))?;
+            let terminal_id = daemon.terminals.open(params)?;
             to_value(TerminalOpenResult { terminal_id })
+        }
+        method::TERMINAL_ATTACH => {
+            let params: TerminalAttachParams = decode(params)?;
+            let result = daemon.terminals.attach(params, Arc::clone(outbox))?;
+            to_value(result)
+        }
+        method::TERMINAL_DETACH => {
+            let params: TerminalDetachParams = decode(params)?;
+            daemon.terminals.detach(params)?;
+            to_value(OpResult::ok())
+        }
+        method::TERMINAL_LIST => {
+            let params: TerminalListParams = decode(params)?;
+            to_value(daemon.terminals.list(params))
         }
         method::TERMINAL_RESIZE => {
             let params: TerminalResizeParams = decode(params)?;

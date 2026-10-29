@@ -630,13 +630,7 @@ async fn list_terminals(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Vec<Terminal>> {
-    let sessions = Arc::clone(&state.sessions);
-    let terminals = db::blocking(move || {
-        sessions.get(&id)?;
-        Ok::<_, ServerError>(sessions.terminals(&id))
-    })
-    .await??;
-    Ok(Json(terminals))
+    state.sessions.terminals(&id).await.map(Json)
 }
 
 async fn terminal_input(
@@ -655,25 +649,63 @@ async fn terminal_output(
     State(state): State<Arc<AppState>>,
     Path((id, terminal)): Path<(String, String)>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>> + Send>, ServerError> {
-    let sessions_service = Arc::clone(&state.sessions);
-    let check = id.clone();
-    db::blocking(move || sessions_service.get(&check)).await??;
-    let subscription = state
-        .sessions
-        .subscribe_terminal(&terminal)
-        .ok_or_else(|| ServerError::not_found("终端不存在"))?;
-    let stream = futures_util::StreamExt::map(subscription.into_stream(), |output| {
-        let output = output.expect("终端输出流不会失败");
-        Ok(Event::default()
-            .event("output")
-            .json_data(output)
-            .expect("终端输出事件始终可序列化"))
+    let session = {
+        let sessions = Arc::clone(&state.sessions);
+        let check = id.clone();
+        db::blocking(move || sessions.get(&check)).await??
+    };
+    let attach = state
+        .machines
+        .terminal_attach(&session.machine, &id, &terminal)
+        .await?;
+    let (pending, receiver) = state
+        .terminals
+        .register(&attach.subscription_id, &session.machine);
+    let guard = TerminalDetachGuard {
+        machines: state.machines.clone(),
+        relay: Arc::clone(&state.terminals),
+        machine: session.machine.clone(),
+        subscription_id: attach.subscription_id.clone(),
+    };
+    let pending = futures_util::stream::iter(pending);
+    let live = futures_util::stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|output| (output, receiver))
     });
+    let stream = futures_util::StreamExt::map(
+        futures_util::StreamExt::chain(pending, live),
+        move |output| {
+            let _ = &guard;
+            Ok(Event::default()
+                .event("output")
+                .json_data(output)
+                .expect("终端输出事件始终可序列化"))
+        },
+    );
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     ))
+}
+
+/// SSE 连接断开时取消 Daemon 侧订阅；连接正常结束（exit）时同样会清理。
+struct TerminalDetachGuard {
+    machines: crate::machines::MachineHub,
+    relay: Arc<crate::terminals::TerminalRelay>,
+    machine: String,
+    subscription_id: String,
+}
+
+impl Drop for TerminalDetachGuard {
+    fn drop(&mut self) {
+        self.relay.unregister(&self.subscription_id);
+        let machines = self.machines.clone();
+        let machine = self.machine.clone();
+        let subscription_id = self.subscription_id.clone();
+        tokio::spawn(async move {
+            machines.terminal_detach(&machine, &subscription_id).await;
+        });
+    }
 }
 
 async fn close_terminal(

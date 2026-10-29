@@ -687,7 +687,7 @@ async fn server_daemon_agent_end_to_end() {
             break output;
         }
     };
-    assert!(output["nextCursor"].as_u64().unwrap() > 0);
+    assert!(output["nextCursor"].as_u64().is_some());
     let terminals = client
         .get(&format!("/sessions/{session_id}/terminals"))
         .await;

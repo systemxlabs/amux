@@ -26,6 +26,12 @@ pub mod method {
     pub const FS_LIST: &str = "fs.list";
     pub const FS_READ: &str = "fs.read";
     pub const TERMINAL_OPEN: &str = "terminal.open";
+    /// 订阅终端输出，返回订阅 ID
+    pub const TERMINAL_ATTACH: &str = "terminal.attach";
+    /// 取消终端订阅
+    pub const TERMINAL_DETACH: &str = "terminal.detach";
+    /// 查询终端列表（可按会话过滤）
+    pub const TERMINAL_LIST: &str = "terminal.list";
     pub const TERMINAL_RESIZE: &str = "terminal.resize";
     pub const TERMINAL_INPUT: &str = "terminal.input";
     pub const TERMINAL_CLOSE: &str = "terminal.close";
@@ -35,10 +41,8 @@ pub mod method {
 pub mod notify {
     /// ACP 消息转发：Server → Daemon 下行、Daemon → Server 上行
     pub const ACP: &str = "acp";
-    /// 终端输出（Daemon → Server）
+    /// 终端输出（含退出事件，按订阅独立推送，Daemon → Server）
     pub const TERMINAL_OUTPUT: &str = "terminal.output";
-    /// 终端进程退出（Daemon → Server）
-    pub const TERMINAL_EXIT: &str = "terminal.exit";
 }
 
 /// 认证握手用的请求头名（HTTP 头名大小写不敏感，统一小写以便 `HeaderName::from_static`）。

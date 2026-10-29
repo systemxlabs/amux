@@ -17,14 +17,14 @@ use amux_common::daemon::{
 };
 use amux_common::domain::{
     FsListParams, FsListResult, FsReadParams, FsReadResult, GitBranchListResult, GitDiffResult,
-    OpResult, TerminalExitNotification, TerminalIdParams, TerminalInputParams, TerminalOpenParams,
+    OpResult, TerminalAttachParams, TerminalAttachResult, TerminalDetachParams, TerminalIdParams,
+    TerminalInfo, TerminalInputParams, TerminalListParams, TerminalListResult, TerminalOpenParams,
     TerminalOpenResult, TerminalOutputNotification, TerminalResizeParams, WorktreeBase,
 };
 use amux_common::jsonrpc::{JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use base64::Engine as _;
 use futures_util::future::join_all;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
@@ -35,7 +35,7 @@ use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use crate::acp::{self, AcpEvent, AgentConnection};
 use crate::error::{ServerError, ServerResult};
 use crate::frames;
-use crate::terminals::TerminalCache;
+use crate::terminals::TerminalRelay;
 
 /// Daemon 请求超时（worktree 创建等可能较慢）。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -45,7 +45,7 @@ pub struct MachineHub {
     token: String,
     config: Arc<crate::config_store::ConfigStore>,
     events: mpsc::UnboundedSender<AcpEvent>,
-    terminals: Arc<TerminalCache>,
+    terminals: Arc<TerminalRelay>,
     machines: Arc<Mutex<HashMap<String, Arc<Machine>>>>,
 }
 
@@ -77,7 +77,7 @@ impl MachineHub {
     pub fn new(
         token: String,
         events: mpsc::UnboundedSender<AcpEvent>,
-        terminals: Arc<TerminalCache>,
+        terminals: Arc<TerminalRelay>,
         config: Arc<crate::config_store::ConfigStore>,
     ) -> Self {
         Self {
@@ -321,6 +321,54 @@ impl MachineHub {
         Ok(result.terminal_id)
     }
 
+    pub async fn terminal_attach(
+        &self,
+        machine: &str,
+        session_id: &str,
+        terminal_id: &str,
+    ) -> ServerResult<TerminalAttachResult> {
+        self.machine(machine)?
+            .request(
+                method::TERMINAL_ATTACH,
+                TerminalAttachParams {
+                    session_id: session_id.to_string(),
+                    terminal_id: terminal_id.to_string(),
+                },
+            )
+            .await
+    }
+
+    pub async fn terminal_detach(&self, machine: &str, subscription_id: &str) {
+        let Ok(machine) = self.machine(machine) else {
+            return;
+        };
+        let _ = machine
+            .request::<_, OpResult>(
+                method::TERMINAL_DETACH,
+                TerminalDetachParams {
+                    subscription_id: subscription_id.to_string(),
+                },
+            )
+            .await;
+    }
+
+    pub async fn terminal_list(
+        &self,
+        machine: &str,
+        session_id: &str,
+    ) -> ServerResult<Vec<TerminalInfo>> {
+        let result: TerminalListResult = self
+            .machine(machine)?
+            .request(
+                method::TERMINAL_LIST,
+                TerminalListParams {
+                    session_id: Some(session_id.to_string()),
+                },
+            )
+            .await?;
+        Ok(result.terminals)
+    }
+
     pub async fn terminal_input(
         &self,
         machine: &str,
@@ -345,7 +393,7 @@ impl MachineHub {
         Ok(())
     }
 
-    pub async fn terminal_close(&self, machine: &str, terminal_id: &str) {
+    pub async fn terminal_close(&self, machine: &str, session_id: &str, terminal_id: &str) {
         let Ok(machine) = self.machine(machine) else {
             return;
         };
@@ -353,6 +401,7 @@ impl MachineHub {
             .request::<_, OpResult>(
                 method::TERMINAL_CLOSE,
                 TerminalIdParams {
+                    session_id: session_id.to_string(),
                     terminal_id: terminal_id.to_string(),
                 },
             )
@@ -511,6 +560,8 @@ impl MachineHub {
         for tx in pending {
             let _ = tx.send(Err(ServerError::machine_offline("Daemon 连接已断开")));
         }
+        // 终端订阅随连接失效：结束该机器的 SSE，由客户端重连后重新 attach。
+        self.terminals.clear_machine(&machine_name);
         log::info!("Daemon 连接断开: {machine_name}");
         Ok(())
     }
@@ -552,6 +603,11 @@ impl MachineHub {
                 };
                 let result = match (response.result, response.error) {
                     (Some(result), _) => Ok(result),
+                    (None, Some(error))
+                        if error.code == amux_common::jsonrpc::server_error::TERMINAL_NOT_FOUND =>
+                    {
+                        Err(ServerError::not_found(error.message))
+                    }
                     (None, Some(error)) => Err(ServerError::invalid_input(error.message)),
                     (None, None) => Ok(serde_json::Value::Null),
                 };
@@ -566,16 +622,7 @@ impl MachineHub {
             notify::ACP => self.route_acp(machine, notification.params),
             notify::TERMINAL_OUTPUT => {
                 if let Some(output) = decode::<TerminalOutputNotification>(notification.params) {
-                    if let Ok(bytes) =
-                        base64::engine::general_purpose::STANDARD.decode(&output.data)
-                    {
-                        self.terminals.output(&output.terminal_id, &bytes);
-                    }
-                }
-            }
-            notify::TERMINAL_EXIT => {
-                if let Some(exit) = decode::<TerminalExitNotification>(notification.params) {
-                    self.terminals.exit(&exit.terminal_id);
+                    self.terminals.forward(output);
                 }
             }
             other => log::debug!("忽略未知通知: {other}"),
@@ -881,7 +928,7 @@ mod tests {
             let hub = Arc::new(MachineHub::new(
                 "token".to_string(),
                 events,
-                Arc::new(TerminalCache::new()),
+                Arc::new(TerminalRelay::new()),
                 Arc::new(crate::config_store::ConfigStore::new(
                     std::env::temp_dir().join("amux-machines-test"),
                 )),

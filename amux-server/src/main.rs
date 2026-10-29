@@ -42,7 +42,7 @@ use crate::machines::MachineHub;
 use crate::sessions::SessionService;
 use crate::state::AppState;
 use crate::store::Store;
-use crate::terminals::TerminalCache;
+use crate::terminals::TerminalRelay;
 use crate::workflows::WorkflowService;
 
 /// 后台维护周期（关闭长时间无活动会话、清理过期终端）。
@@ -79,7 +79,7 @@ async fn run(args: Args) -> Result<(), String> {
     let home = amux_common::paths::amux_home();
     let store = Arc::new(Store::open(&home)?);
     let config = Arc::new(ConfigStore::new(home.clone()));
-    let terminals = Arc::new(TerminalCache::new());
+    let terminals = Arc::new(TerminalRelay::new());
     let attachments = Arc::new(AttachmentStore::new(home.clone()));
     let (events_tx, events_rx) = mpsc::unbounded_channel();
 
@@ -92,7 +92,6 @@ async fn run(args: Args) -> Result<(), String> {
     let sessions = Arc::new(SessionService::new(
         Arc::clone(&store),
         machines.clone(),
-        Arc::clone(&terminals),
         Arc::clone(&config),
     ));
     let workflows = Arc::new(WorkflowService::new(
@@ -141,6 +140,7 @@ async fn run(args: Args) -> Result<(), String> {
         groups,
         automations,
         attachments,
+        terminals,
     });
     // 鉴权只对命中 API 路由的请求生效：浏览器加载页面时无法携带 Authorization 头，
     // 静态资源与未命中路径必须免鉴权，否则 Web 应用无法加载、

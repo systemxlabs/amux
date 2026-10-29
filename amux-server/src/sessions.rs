@@ -29,7 +29,6 @@ use crate::db;
 use crate::error::{ServerError, ServerResult};
 use crate::machines::MachineHub;
 use crate::store::Store;
-use crate::terminals::{TerminalCache, TerminalSubscription, IDLE_EXPIRE_MS};
 use crate::timestamps::now_ms;
 
 /// 会话长时间无活动后关闭 agent 侧会话的阈值。
@@ -76,7 +75,6 @@ impl SessionCaches {
 pub struct SessionService {
     store: Arc<Store>,
     machines: MachineHub,
-    terminals: Arc<TerminalCache>,
     config: Arc<ConfigStore>,
     pub caches: Arc<SessionCaches>,
 }
@@ -112,16 +110,10 @@ pub struct CreateSessionParams<'a> {
 }
 
 impl SessionService {
-    pub fn new(
-        store: Arc<Store>,
-        machines: MachineHub,
-        terminals: Arc<TerminalCache>,
-        config: Arc<ConfigStore>,
-    ) -> Self {
+    pub fn new(store: Arc<Store>, machines: MachineHub, config: Arc<ConfigStore>) -> Self {
         Self {
             store,
             machines,
-            terminals,
             config,
             caches: Arc::new(SessionCaches::default()),
         }
@@ -351,7 +343,6 @@ impl SessionService {
         db::blocking_sync(|| self.store.delete_session(id));
         self.caches.forget(id);
 
-        let terminals = self.terminals.remove_session(id);
         let machines = self.machines.clone();
         let worktree_dir = session.worktree_dir.clone();
         let workspace = session.workspace.clone();
@@ -359,11 +350,18 @@ impl SessionService {
         let agent = session.agent.clone();
         let session_id = id.to_string();
         tokio::spawn(async move {
-            for terminal_id in terminals {
+            let terminals = machines
+                .terminal_list(&machine, &session_id)
+                .await
+                .unwrap_or_default();
+            for terminal in terminals {
                 log::info!(
-                    "会话删除清理终端: session={session_id} terminal={terminal_id} machine={machine}"
+                    "会话删除清理终端: session={session_id} terminal={} machine={machine}",
+                    terminal.terminal_id
                 );
-                machines.terminal_close(&machine, &terminal_id).await;
+                machines
+                    .terminal_close(&machine, &session_id, &terminal.terminal_id)
+                    .await;
             }
             if let Some(agent_session_id) = agent_session_id {
                 if let Ok(conn) = machines.acp(&machine, &agent).await {
@@ -471,21 +469,33 @@ impl SessionService {
             .terminal_open(
                 &session.machine,
                 TerminalOpenParams {
+                    session_id: id.to_string(),
                     cwd: cwd.clone(),
                     cols,
                     rows,
                 },
             )
             .await?;
-        self.terminals.open(id, &terminal_id, &cwd, cols, rows);
         log::info!(
             "终端已打开: session={id} terminal={terminal_id} cwd={cwd} cols={cols} rows={rows}"
         );
         Ok(terminal_id)
     }
 
-    pub fn terminals(&self, id: &str) -> Vec<ApiTerminal> {
-        self.terminals.list(id)
+    /// 终端列表来自 Daemon（权威），Server 不再缓存。
+    pub async fn terminals(&self, id: &str) -> ServerResult<Vec<ApiTerminal>> {
+        let session = db::blocking_sync(|| self.get(id))?;
+        let terminals = self.machines.terminal_list(&session.machine, id).await?;
+        Ok(terminals
+            .into_iter()
+            .map(|terminal| ApiTerminal {
+                id: terminal.terminal_id,
+                cwd: terminal.cwd,
+                cols: terminal.cols,
+                rows: terminal.rows,
+                state: terminal.state,
+            })
+            .collect())
     }
 
     pub async fn terminal_input(
@@ -494,12 +504,12 @@ impl SessionService {
         terminal_id: &str,
         data: String,
     ) -> ServerResult<()> {
-        let machine = db::blocking_sync(|| self.terminal_machine(id, terminal_id))?;
-        self.terminals.touch(terminal_id);
+        let session = db::blocking_sync(|| self.get(id))?;
         self.machines
             .terminal_input(
-                &machine,
+                &session.machine,
                 amux_common::domain::TerminalInputParams {
+                    session_id: id.to_string(),
                     terminal_id: terminal_id.to_string(),
                     data,
                 },
@@ -514,12 +524,12 @@ impl SessionService {
         cols: u16,
         rows: u16,
     ) -> ServerResult<()> {
-        let machine = db::blocking_sync(|| self.terminal_machine(id, terminal_id))?;
-        self.terminals.resize(terminal_id, cols, rows);
+        let session = db::blocking_sync(|| self.get(id))?;
         self.machines
             .terminal_resize(
-                &machine,
+                &session.machine,
                 TerminalResizeParams {
+                    session_id: id.to_string(),
                     terminal_id: terminal_id.to_string(),
                     cols,
                     rows,
@@ -528,23 +538,13 @@ impl SessionService {
             .await
     }
 
-    pub fn subscribe_terminal(&self, terminal_id: &str) -> Option<TerminalSubscription> {
-        self.terminals.subscribe(terminal_id)
-    }
-
     pub async fn terminal_close(&self, id: &str, terminal_id: &str) -> ServerResult<()> {
-        let machine = db::blocking_sync(|| self.terminal_machine(id, terminal_id))?;
-        self.terminals.remove(terminal_id);
-        self.machines.terminal_close(&machine, terminal_id).await;
+        let session = db::blocking_sync(|| self.get(id))?;
+        self.machines
+            .terminal_close(&session.machine, id, terminal_id)
+            .await;
         log::info!("终端已关闭: session={id} terminal={terminal_id}");
         Ok(())
-    }
-
-    fn terminal_machine(&self, id: &str, terminal_id: &str) -> ServerResult<String> {
-        if !self.terminals.contains(terminal_id) {
-            return Err(ServerError::not_found("终端不存在"));
-        }
-        Ok(self.get(id)?.machine)
     }
 
     // ---------- 内部 ----------
@@ -995,15 +995,6 @@ impl SessionService {
                     }
                 }
             }
-        }
-        // 终端超过 1 天没有输入输出即删除，并通知机器关闭对应 PTY（docs/DESIGN.md「终端存储」）
-        for (session_id, terminal_id) in self.terminals.sweep_idle(now, IDLE_EXPIRE_MS) {
-            if let Ok(session) = db::blocking_sync(|| self.get(&session_id)) {
-                self.machines
-                    .terminal_close(&session.machine, &terminal_id)
-                    .await;
-            }
-            log::info!("终端长时间无输入输出，已删除: session={session_id} terminal={terminal_id}");
         }
     }
 }

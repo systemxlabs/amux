@@ -419,6 +419,7 @@ async function consumeTerminalStream(
   while (isCurrentTerminalStream(core, key, controller)) {
     let first = true;
     let lastCursor: number | undefined;
+    let exited = false;
     const client = core.client;
     const target = core.state.open;
     const terminal = core.state.detail.activeTerminal;
@@ -434,6 +435,7 @@ async function consumeTerminalStream(
           const reset = first || output.truncated === true;
           first = false;
           lastCursor = output.nextCursor;
+          if (output.exited) exited = true;
           const bytes = decodeBase64(output.data);
           if (bytes.length === 0 && !reset) return;
           core.pushTerminalChunk(bytes, reset);
@@ -458,6 +460,8 @@ async function consumeTerminalStream(
       // 连接失败时保留当前画面，短暂退避后重新建立 SSE。
       console.warn("终端流中断，准备重连", error);
     }
+    // 进程已退出：保留最后画面，不再重连。
+    if (exited) break;
     if (controller.signal.aborted) break;
     await abortableDelay(TERMINAL_RETRY_DELAY, controller.signal);
   }

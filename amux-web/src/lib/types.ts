@@ -190,7 +190,12 @@ export type Terminal = {
   rows: number;
   state: TerminalState;
 };
-export type TerminalOutput = { data: string; nextCursor: number; truncated?: boolean };
+export type TerminalOutput = {
+  data: string;
+  nextCursor: number;
+  truncated?: boolean;
+  exited?: boolean;
+};
 
 export type Attachment = {
   name: string;
