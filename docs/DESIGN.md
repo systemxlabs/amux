@@ -37,7 +37,10 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 | `git.remove_worktree` | 删除指定 worktree |
 | `fs.list` | 分页查看指定路径文件夹列表 |
 | `fs.read` | 分页查看指定路径文本文件内容 |
-| `terminal.open` | 打开一个终端，指定 cwd 和 size 等，返回终端 ID |
+| `terminal.open` | 打开一个终端 |
+| `terminal.attach` | 订阅一个终端，返回订阅 ID |
+| `terminal.detach` | 取消订阅终端 |
+| `terminal.list` | 返回终端列表 |
 | `terminal.resize` | 调整指定终端窗口大小 |
 | `terminal.input` |  向指定终端输入内容 |
 | `terminal.close` |  关闭指定终端 |
@@ -46,8 +49,7 @@ Daemon 主动推送通知
 | 通知 | 描述 |
 |---|---|
 | `acp` | ACP 消息转发 |
-| `terminal.output` | 终端输出事件 |
-| `terminal.exit` | 终端进程退出事件 |
+| `terminal.output` | 向每个订阅方独立推送终端输出（包括 exit） |
 
 Server 主动推送通知
 | 通知 | 描述 |
@@ -275,7 +277,11 @@ Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<5字符随机
 
 ### 终端存储
 
-Daemon 在内存中仅存储终端元信息，终端输出由 Server 侧缓存。
+Daemon 在内存中存储终端元信息，终端跟普通会话绑定，每个普通会话可以有多个终端。普通会话删除时，需要删除对应终端。
+
+Daemon 在内存中采用环形缓冲存储终端输出（包括 exit），有最大值上限，超限丢弃旧的输出。每个终端独立维护从零自增的输出序号。
+
+当终端超过 1 天没有任何输入和输出时，自动删除该终端。
 
 ### 断线重连
 
@@ -452,12 +458,6 @@ Server 作为 ACP client 与 Agents 通信
 Server 在接收到流式内容后，读取磁盘已有内容并按 ACP V2 流式传输语义进行合并，然后立即落盘。
 
 会话删除时，删除其对应的所有附件。
-
-### 终端存储
-
-Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的输出。终端跟普通会话绑定，每个普通会话可以有多个终端。普通会话删除时，需要删除对应终端。
-
-当终端超过 1 天没有任何输入和输出时，自动删除该终端。
 
 ### 工作树管理
 
