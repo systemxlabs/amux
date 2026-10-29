@@ -1054,9 +1054,11 @@ export async function sendPrompt(
   core.update((state) => {
     if (includeAttachments) state.attachments = [];
   });
-  await Promise.all([refreshHistory(core), refreshList(core)]);
+  // 发送已成功受理，立即返回：由调用方清空输入框，无需等待整窗历史刷新。
+  // 历史与列表刷新在后台进行，失败仅记录，不阻塞 UI。
   core.last.history = Date.now();
   core.last.list = Date.now();
+  void Promise.all([refreshHistory(core), refreshList(core)]);
   return true;
 }
 
