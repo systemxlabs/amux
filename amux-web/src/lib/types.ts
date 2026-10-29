@@ -192,7 +192,7 @@ export type Terminal = {
 };
 export type TerminalOutput = {
   data: string;
-  nextCursor: number;
+  sequence: number;
   truncated?: boolean;
   exited?: boolean;
 };

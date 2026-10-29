@@ -41,7 +41,7 @@ impl TerminalRelay {
     pub fn forward(&self, notification: TerminalOutputNotification) {
         let output = TerminalOutput {
             data: notification.data.unwrap_or_default(),
-            next_cursor: notification.sequence,
+            sequence: notification.sequence,
             truncated: notification.truncated,
             exited: notification.exit,
         };
@@ -117,8 +117,8 @@ mod tests {
 
         let (pending, mut receiver) = relay.register("s1", "m1");
         assert_eq!(pending.len(), 2);
-        assert_eq!(pending[0].next_cursor, 0);
-        assert_eq!(pending[1].next_cursor, 1);
+        assert_eq!(pending[0].sequence, 0);
+        assert_eq!(pending[1].sequence, 1);
         assert!(receiver.try_recv().is_err());
     }
 
@@ -129,7 +129,7 @@ mod tests {
         relay.forward(notification("s1", 2, "live"));
         let output = receiver.recv().await.unwrap();
         assert_eq!(output.data, "live");
-        assert_eq!(output.next_cursor, 2);
+        assert_eq!(output.sequence, 2);
     }
 
     #[test]

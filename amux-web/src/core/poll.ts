@@ -418,7 +418,7 @@ async function consumeTerminalStream(
 ): Promise<void> {
   while (isCurrentTerminalStream(core, key, controller)) {
     let first = true;
-    let lastCursor: number | undefined;
+    let lastSequence: number | undefined;
     let exited = false;
     const client = core.client;
     const target = core.state.open;
@@ -431,10 +431,10 @@ async function consumeTerminalStream(
         controller.signal,
         (output) => {
           if (!isCurrentTerminalStream(core, key, controller)) return;
-          if (lastCursor !== undefined && output.nextCursor <= lastCursor) return;
+          if (lastSequence !== undefined && output.sequence <= lastSequence) return;
           const reset = first || output.truncated === true;
           first = false;
-          lastCursor = output.nextCursor;
+          lastSequence = output.sequence;
           if (output.exited) exited = true;
           const bytes = decodeBase64(output.data);
           if (bytes.length === 0 && !reset) return;

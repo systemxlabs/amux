@@ -79,8 +79,8 @@ beforeAll(async () => {
     }
     if (/^\/sessions\/[^/]+\/terminals\/[^/]+$/.test(url) && request.method === "GET") {
       response.writeHead(200, { "content-type": "text/event-stream" });
-      response.write('event: output\ndata: {"data":"aGk=","nextCursor":2}\n\n');
-      response.write('event: output\ndata: {"data":"IQ==","nextCursor":3}\n\n');
+      response.write('event: output\ndata: {"data":"aGk=","sequence":2}\n\n');
+      response.write('event: output\ndata: {"data":"IQ==","sequence":3}\n\n');
       response.end();
       return;
     }
@@ -276,7 +276,7 @@ describe("ApiClient", () => {
 
   it("终端 SSE 携带认证并逐事件解析输出", async () => {
     const client = new ApiClient(base, "tk");
-    const outputs: { data: string; nextCursor: number }[] = [];
+    const outputs: { data: string; sequence: number }[] = [];
     await client.terminalOutputStream(
       "s1",
       "t1",
@@ -286,8 +286,8 @@ describe("ApiClient", () => {
 
     expect(seen.at(-1)?.authorization).toBe("Bearer tk");
     expect(outputs).toEqual([
-      { data: "aGk=", nextCursor: 2 },
-      { data: "IQ==", nextCursor: 3 },
+      { data: "aGk=", sequence: 2 },
+      { data: "IQ==", sequence: 3 },
     ]);
   });
 

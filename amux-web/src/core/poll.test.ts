@@ -356,12 +356,12 @@ describe("tick 终端流", () => {
         _id: string,
         _terminal: string,
         signal: AbortSignal,
-        onOutput: (output: { data: string; nextCursor: number }) => void,
+        onOutput: (output: { data: string; sequence: number }) => void,
       ) =>
         new Promise<void>((resolve) => {
           streamSignal = signal;
-          onOutput({ data: "aGk=", nextCursor: 2 });
-          onOutput({ data: "IQ==", nextCursor: 3 });
+          onOutput({ data: "aGk=", sequence: 2 });
+          onOutput({ data: "IQ==", sequence: 3 });
           signal.addEventListener("abort", () => resolve(), { once: true });
         }),
     });
