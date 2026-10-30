@@ -386,6 +386,52 @@ describe("tick 终端流", () => {
     stopTerminalStream(core);
     expect(streamSignal?.aborted).toBe(true);
   });
+
+  it("终端流中断重连时携带续传游标且不再清屏", async () => {
+    vi.useFakeTimers();
+    try {
+      const cursors: (number | undefined)[] = [];
+      let attempt = 0;
+      const { client } = recordingClient({
+        ongoingActivity: () => null,
+        terminalOutputStream: (
+          _id: string,
+          _terminal: string,
+          signal: AbortSignal,
+          onOutput: (output: { data: string; sequence: number }) => void,
+          cursor?: number,
+        ) => {
+          cursors.push(cursor);
+          attempt += 1;
+          if (attempt === 1) {
+            onOutput({ data: "aGk=", sequence: 0 });
+            // 流正常结束（例如订阅被中转端摘除），客户端应续传而不是从头重放。
+            return Promise.resolve();
+          }
+          onOutput({ data: "IQ==", sequence: 1 });
+          return new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+        },
+      });
+      const core = onlineCore(client);
+      core.state.middle = "interaction";
+      core.state.open = { kind: "session", id: "s1" };
+      core.state.sidePanel = "terminal";
+      core.state.detail.activeTerminal = "t1";
+
+      await tick(core);
+      expect(cursors).toEqual([undefined]);
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(cursors).toEqual([undefined, 1]);
+      expect(core.state.detail.terminalChunks.map((chunk) => chunk.reset)).toEqual([true, false]);
+
+      stopTerminalStream(core);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("refreshInteraction", () => {

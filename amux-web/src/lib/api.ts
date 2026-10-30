@@ -303,8 +303,13 @@ export class ApiClient {
     terminal: string,
     signal: AbortSignal,
     onOutput: (output: TerminalOutput) => void,
+    sequence?: number,
   ): Promise<void> {
-    const response = await this.send(this.terminalPath(id, terminal), { method: "GET", signal });
+    const path =
+      sequence === undefined
+        ? this.terminalPath(id, terminal)
+        : `${this.terminalPath(id, terminal)}?sequence=${sequence}`;
+    const response = await this.send(path, { method: "GET", signal });
     if (!response.ok) {
       const body = await response.text().catch(() => "");
       throw new ApiError(response.status, errorMessage(response.status, body));

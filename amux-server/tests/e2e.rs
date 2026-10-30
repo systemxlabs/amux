@@ -688,6 +688,65 @@ async fn server_daemon_agent_end_to_end() {
         }
     };
     assert!(output["sequence"].as_u64().is_some());
+
+    // 续传：携带游标重新订阅时只收到游标之后的新输出，不从头重放
+    let resume_from = output["sequence"].as_u64().unwrap() + 1;
+    let resumed = client
+        .http
+        .get(format!(
+            "{}/sessions/{session_id}/terminals/{terminal_id}?sequence={resume_from}",
+            client.base
+        ))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .expect("连接续传 SSE 失败");
+    assert!(resumed.status().is_success());
+    let resumed_stream = resumed.bytes_stream();
+    tokio::pin!(resumed_stream);
+    let input = base64::engine::general_purpose::STANDARD.encode(b"echo amux-resume\n");
+    client
+        .post_ok(
+            &format!("/sessions/{session_id}/terminals/{terminal_id}"),
+            json!({ "data": input }),
+        )
+        .await;
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let mut resumed_wire = String::new();
+    let mut replayed_old = false;
+    let resumed_output = loop {
+        let chunk = tokio::time::timeout_at(deadline, resumed_stream.next())
+            .await
+            .expect("等待续传 SSE 输出超时")
+            .expect("续传 SSE 提前结束")
+            .expect("读取续传 SSE 失败");
+        resumed_wire.push_str(&String::from_utf8_lossy(&chunk));
+        let mut found = None;
+        for data in resumed_wire
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+        {
+            let Ok(value) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(value["data"].as_str().unwrap_or_default())
+                .unwrap_or_default();
+            let text = String::from_utf8_lossy(&bytes);
+            if text.contains("amux-terminal") {
+                replayed_old = true;
+            }
+            if text.contains("amux-resume") {
+                found = Some(value);
+            }
+        }
+        if let Some(value) = found {
+            break value;
+        }
+    };
+    assert!(resumed_output["sequence"].as_u64().unwrap() >= resume_from);
+    assert!(!replayed_old, "带游标续传不应重放游标之前的输出");
+
     let terminals = client
         .get(&format!("/sessions/{session_id}/terminals"))
         .await;

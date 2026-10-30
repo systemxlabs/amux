@@ -11,7 +11,7 @@ use amux_common::domain::TerminalOutputNotification;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
-/// 单个 SSE 连接的中转队列上限；落后时断开，由客户端重连并重新 attach。
+/// 单个 SSE 连接的中转队列上限；落后时断开，由客户端携带游标重连并续传。
 const CHANNEL_CAPACITY: usize = 256;
 /// attach 响应到达前暂存的事件上限。
 const PENDING_LIMIT: usize = 4096;

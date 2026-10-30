@@ -326,6 +326,7 @@ impl MachineHub {
         machine: &str,
         session_id: &str,
         terminal_id: &str,
+        sequence: Option<u64>,
     ) -> ServerResult<TerminalAttachResult> {
         self.machine(machine)?
             .request(
@@ -333,6 +334,7 @@ impl MachineHub {
                 TerminalAttachParams {
                     session_id: session_id.to_string(),
                     terminal_id: terminal_id.to_string(),
+                    sequence,
                 },
             )
             .await

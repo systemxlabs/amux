@@ -645,9 +645,16 @@ async fn terminal_input(
         .map(|_| Json(OpAck { ok: true }))
 }
 
+/// 终端 SSE 查询参数：续传游标（期望收到的下一个输出序号，含）。
+#[derive(Debug, Deserialize)]
+struct TerminalStreamQuery {
+    sequence: Option<u64>,
+}
+
 async fn terminal_output(
     State(state): State<Arc<AppState>>,
     Path((id, terminal)): Path<(String, String)>,
+    Query(query): Query<TerminalStreamQuery>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>> + Send>, ServerError> {
     let session = {
         let sessions = Arc::clone(&state.sessions);
@@ -656,7 +663,7 @@ async fn terminal_output(
     };
     let attach = state
         .machines
-        .terminal_attach(&session.machine, &id, &terminal)
+        .terminal_attach(&session.machine, &id, &terminal, query.sequence)
         .await?;
     let (pending, receiver) = state
         .terminals

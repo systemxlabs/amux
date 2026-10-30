@@ -322,7 +322,7 @@ impl TerminalRegistry {
         log::info!("终端进程已退出: terminal={terminal_id}");
     }
 
-    /// 订阅终端：先把环形缓冲从头推给该订阅，再接收实时输出。
+    /// 订阅终端：先重放环形缓冲中游标之后的部分，再接收实时输出。
     pub fn attach(
         self: &Arc<Self>,
         params: TerminalAttachParams,
@@ -338,9 +338,10 @@ impl TerminalRegistry {
             if handle.session_id != params.session_id {
                 return Err(not_found());
             }
-            let truncated = handle.start_seq > 0;
+            let (replay, truncated) =
+                replay_blocks(&handle.buffer, handle.start_seq, params.sequence);
             let mut first = true;
-            for block in &handle.buffer {
+            for block in replay {
                 let _ = tx.send(TerminalEvent {
                     sequence: block.sequence,
                     data: Some(Arc::clone(&block.data)),
@@ -542,6 +543,26 @@ impl TerminalRegistry {
     }
 }
 
+/// 选出订阅需要重放的块：
+/// - 无游标：从缓冲开头重放；
+/// - 游标早于缓冲头：从缓冲头重放并标记缺口（返回的 bool），客户端据此重置画面；
+/// - 游标在缓冲范围内或之后：从第一个序号不小于游标的块开始。
+fn replay_blocks(
+    buffer: &VecDeque<Block>,
+    start_seq: u64,
+    sequence: Option<u64>,
+) -> (impl Iterator<Item = &Block>, bool) {
+    let truncated = match sequence {
+        Some(sequence) => sequence < start_seq,
+        None => start_seq > 0,
+    };
+    let from = sequence.unwrap_or(start_seq).max(start_seq);
+    (
+        buffer.iter().filter(move |block| block.sequence >= from),
+        truncated,
+    )
+}
+
 fn not_found() -> RpcError {
     RpcError {
         code: amux_common::jsonrpc::server_error::TERMINAL_NOT_FOUND,
@@ -620,6 +641,7 @@ mod tests {
                 TerminalAttachParams {
                     session_id: "s1".into(),
                     terminal_id: terminal_id.clone(),
+                    sequence: None,
                 },
                 Arc::clone(&outbox),
             )
@@ -694,9 +716,56 @@ mod tests {
                 TerminalAttachParams {
                     session_id: "s1".into(),
                     terminal_id: "nope".into(),
+                    sequence: None,
                 },
                 Arc::new(Outbox::new()),
             )
             .is_err());
+    }
+
+    fn blocks(sequences: &[u64]) -> VecDeque<Block> {
+        sequences
+            .iter()
+            .map(|&sequence| Block {
+                sequence,
+                data: Arc::new(Vec::new()),
+            })
+            .collect()
+    }
+
+    fn replayed_sequences<'a>(replay: impl Iterator<Item = &'a Block>) -> Vec<u64> {
+        replay.map(|block| block.sequence).collect()
+    }
+
+    #[test]
+    fn replay_without_cursor_streams_from_buffer_start() {
+        let buffer = blocks(&[5, 6]);
+        let (replay, truncated) = replay_blocks(&buffer, 5, None);
+        assert_eq!(replayed_sequences(replay), vec![5, 6]);
+        assert!(truncated, "缓冲已丢弃更早输出时需提示客户端");
+    }
+
+    #[test]
+    fn replay_from_cursor_skips_already_received_blocks() {
+        let buffer = blocks(&[0, 1, 2]);
+        let (replay, truncated) = replay_blocks(&buffer, 0, Some(1));
+        assert_eq!(replayed_sequences(replay), vec![1, 2]);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn replay_marks_gap_when_cursor_is_before_buffer_start() {
+        let buffer = blocks(&[5, 6]);
+        let (replay, truncated) = replay_blocks(&buffer, 5, Some(3));
+        assert_eq!(replayed_sequences(replay), vec![5, 6]);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn replay_after_latest_sequence_is_empty() {
+        let buffer = blocks(&[0, 1]);
+        let (replay, truncated) = replay_blocks(&buffer, 0, Some(2));
+        assert!(replay.count() == 0);
+        assert!(!truncated);
     }
 }

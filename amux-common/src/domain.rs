@@ -492,6 +492,9 @@ pub struct TerminalOpenResult {
 pub struct TerminalAttachParams {
     pub session_id: String,
     pub terminal_id: String,
+    /// 期望收到的下一个输出序号（含）；缺省表示从缓冲区开头重放
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
 }
 
 /// `terminal.attach` 结果。

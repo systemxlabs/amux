@@ -416,9 +416,11 @@ async function consumeTerminalStream(
   key: string,
   controller: AbortController,
 ): Promise<void> {
+  // 跨重连保留：重连时从已收到的下一个序号续传，不再清屏重放全量缓冲。
+  let lastSequence: number | undefined;
   while (isCurrentTerminalStream(core, key, controller)) {
+    const resumeFrom = lastSequence === undefined ? undefined : lastSequence + 1;
     let first = true;
-    let lastSequence: number | undefined;
     let exited = false;
     const client = core.client;
     const target = core.state.open;
@@ -432,7 +434,8 @@ async function consumeTerminalStream(
         (output) => {
           if (!isCurrentTerminalStream(core, key, controller)) return;
           if (lastSequence !== undefined && output.sequence <= lastSequence) return;
-          const reset = first || output.truncated === true;
+          // 首次全量重放或缓冲区存在缺口时才重置网格；续传沿用现有画面。
+          const reset = (first && resumeFrom === undefined) || output.truncated === true;
           first = false;
           lastSequence = output.sequence;
           if (output.exited) exited = true;
@@ -440,6 +443,7 @@ async function consumeTerminalStream(
           if (bytes.length === 0 && !reset) return;
           core.pushTerminalChunk(bytes, reset);
         },
+        resumeFrom,
       );
     } catch (error) {
       if (controller.signal.aborted || core.client === null) break;
