@@ -185,7 +185,7 @@ Daemon 启动和关闭由用户手动执行，启动参数包括
 
 Daemon 启动时对 `~/.amux/daemon/<机器名>.lock` 锁文件加排他锁，加锁失败则打印日志并退出，持锁进程退出（含崩溃）时锁自动释放。
 
-Daemon 关闭时，向 Server 发送即将关闭事件，等待 10s，然后关闭所有已启动的 Agents。
+Daemon 关闭时，向 Server 发送即将关闭事件，等待 10s，然后关闭所有已启动的 Agents 和终端。
 
 ### Agent 发现和启动
 
@@ -311,7 +311,7 @@ Server 启动和关闭由用户手动执行，启动参数包括
 
 Server 的 WebSocket 监听地址为 `ws://<host>:<port>/daemon`。
 
-Server 关闭时，取消并关闭所有打开的 Agent 侧会话，然后固定等待 10s。
+Server 关闭时，关闭所有打开的 Agent 侧会话，然后固定等待 10s。
 
 ### Agent 生命周期
 
@@ -326,7 +326,7 @@ Server 关闭时，取消并关闭所有打开的 Agent 侧会话，然后固定
     2. 如果 agent 未启动，则启动 agent 并执行 ACP 初始化
     3. 如果 agent 已启动，则直接复用 Server 侧持有的该 agent 的活跃 ACP 连接记录
 
-Server 接收 Daemon 即将关闭事件时，取消并关闭该机器所有打开的 Agent 侧会话。
+Server 接收 Daemon 即将关闭事件时，关闭该机器所有打开的 Agent 侧会话。
 
 Server 可中途重启某一 Agent（无论是否已启动）。
 
