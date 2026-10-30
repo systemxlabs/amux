@@ -948,7 +948,6 @@ impl SessionService {
             }
             AcpEvent::AgentRestarted { machine, agent } => {
                 for session in self.store.sessions_of_agent(&machine, &agent) {
-                    self.store.set_state(&session.id, SessionState::Idle);
                     self.caches.forget(&session.id);
                 }
                 None

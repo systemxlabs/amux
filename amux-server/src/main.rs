@@ -48,6 +48,9 @@ use crate::workflows::WorkflowService;
 /// 后台维护周期（关闭长时间无活动会话、清理过期终端）。
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(600);
 
+/// 关闭所有会话后，留给 Agent 状态通知落盘的时间（docs/DESIGN.md「Server 启动和关闭」）。
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Parser)]
 #[command(name = "amux-server", about = "公网枢纽：对接 Client 与各机器 Daemon")]
 struct Args {
@@ -162,6 +165,7 @@ async fn run(args: Args) -> Result<(), String> {
                 shutdown_signal().await;
                 log::info!("Server 关闭：关闭所有打开的 Agent 侧会话");
                 machines.close_all_sessions().await;
+                tokio::time::sleep(SHUTDOWN_WAIT).await;
             }
         })
         .await

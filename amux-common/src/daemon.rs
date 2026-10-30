@@ -37,10 +37,12 @@ pub mod method {
     pub const TERMINAL_CLOSE: &str = "terminal.close";
 }
 
-/// 通知名（`acp` 双向复用，`terminal.*` 仅 Daemon → Server 上行）。
+/// 通知名（`acp` 双向复用，`machine.shutdown` 与 `terminal.*` 仅 Daemon → Server 上行）。
 pub mod notify {
     /// ACP 消息转发：Server → Daemon 下行、Daemon → Server 上行
     pub const ACP: &str = "acp";
+    /// Daemon 即将关闭（Daemon → Server）
+    pub const MACHINE_SHUTDOWN: &str = "machine.shutdown";
     /// 终端输出（含退出事件，按订阅独立推送，Daemon → Server）
     pub const TERMINAL_OUTPUT: &str = "terminal.output";
 }

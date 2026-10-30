@@ -1090,6 +1090,100 @@ async fn server_shutdown_closes_all_open_agent_sessions() {
 }
 
 #[tokio::test]
+async fn daemon_shutdown_cancels_and_closes_its_sessions() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let state_file = home.path().join("mock_state");
+    let bin = fake_bin(Path::new(env!("CARGO_BIN_EXE_mock_acp")), &state_file);
+    let port = free_port();
+
+    let _server = spawn_server(port, home.path());
+    let client = Client {
+        http: reqwest::Client::new(),
+        base: format!("http://127.0.0.1:{port}"),
+    };
+    poll(
+        || {
+            let client = &client;
+            async move {
+                client
+                    .http
+                    .get(format!("{}/machines", client.base))
+                    .send()
+                    .await
+                    .ok()
+            }
+        },
+        "server 监听",
+    )
+    .await;
+
+    let daemon = spawn_daemon(port, home.path(), &[&bin]);
+    poll(
+        || async {
+            let agents = client
+                .try_get(&format!("/machines/{MACHINE}/agents"))
+                .await?;
+            agents
+                .as_array()?
+                .iter()
+                .any(|agent| agent["name"] == "codex" && agent["available"] == true)
+                .then_some(())
+        },
+        "codex 可用",
+    )
+    .await;
+
+    let session = client
+        .post_ok(
+            "/sessions",
+            json!({
+                "machine": MACHINE,
+                "agent": "codex",
+                "workspace": workspace.path().to_string_lossy(),
+            }),
+        )
+        .await;
+    let session_id = session["id"].as_str().unwrap();
+    client
+        .get(&format!("/sessions/{session_id}/config_options"))
+        .await;
+    poll(
+        || async {
+            let agents = client
+                .try_get(&format!("/machines/{MACHINE}/agents"))
+                .await?;
+            agents
+                .as_array()?
+                .iter()
+                .find(|agent| agent["name"] == "codex")
+                .filter(|agent| agent["openedSessions"] == 1)
+                .cloned()
+        },
+        "agent 侧会话已打开",
+    )
+    .await;
+
+    // Daemon 收到终止信号后先通知 Server；Server 经仍存活的连接关闭会话。
+    daemon.terminate();
+    let calls_file = format!("{}.calls", state_file.display());
+    poll(
+        || {
+            let calls_file = calls_file.clone();
+            async move {
+                let calls = std::fs::read_to_string(&calls_file).ok()?;
+                calls
+                    .lines()
+                    .any(|line| line == "session/close")
+                    .then_some(())
+            }
+        },
+        "Daemon 关闭时 Server 关闭会话",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn prompt_accepts_body_above_axum_default_limit() {
     let home = tempfile::tempdir().unwrap();
     let port = free_port();

@@ -429,21 +429,10 @@ impl MachineHub {
         Ok(conn)
     }
 
-    /// 关闭所有已打开会话，供 Server 退出时清理 Agent 侧资源。
+    /// 关闭所有已打开会话：Server 退出时清理 Agent 侧资源。
     pub async fn close_all_sessions(&self) {
         let machines: Vec<_> = self.machines.lock().values().cloned().collect();
-        let connections: Vec<_> = machines
-            .into_iter()
-            .flat_map(|machine| {
-                machine
-                    .agents
-                    .lock()
-                    .values()
-                    .filter_map(|slot| slot.conn.clone())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        join_all(connections.iter().map(|connection| connection.close_all())).await;
+        join_all(machines.iter().map(close_sessions)).await;
     }
 
     // ---------- Daemon 连接 ----------
@@ -620,6 +609,11 @@ impl MachineHub {
         };
         match notification.method.as_str() {
             notify::ACP => self.route_acp(machine, notification.params),
+            notify::MACHINE_SHUTDOWN => {
+                log::info!("Daemon 即将关闭，关闭其所有会话: {}", machine.name);
+                let machine = Arc::clone(machine);
+                tokio::spawn(async move { close_sessions(&machine).await });
+            }
             notify::TERMINAL_OUTPUT => {
                 if let Some(output) = decode::<TerminalOutputNotification>(notification.params) {
                     self.terminals.forward(output);
@@ -856,6 +850,17 @@ impl Machine {
         serde_json::from_value(response)
             .map_err(|error| ServerError::internal(format!("应答解析失败（{method}）: {error}")))
     }
+}
+
+/// 关闭一台机器上所有打开的 Agent 侧会话。
+async fn close_sessions(machine: &Arc<Machine>) {
+    let connections: Vec<_> = machine
+        .agents
+        .lock()
+        .values()
+        .filter_map(|slot| slot.conn.clone())
+        .collect();
+    join_all(connections.iter().map(|connection| connection.close_all())).await;
 }
 
 fn decode<T: DeserializeOwned>(params: Option<serde_json::Value>) -> Option<T> {

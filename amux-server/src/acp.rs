@@ -111,7 +111,7 @@ pub enum AcpEvent {
         used: u64,
         size: u64,
     },
-    /// Agent 被重启（生命周期步骤或用户手动）：其会话状态需回到空闲
+    /// Agent 被重启（生命周期步骤或用户手动）：其会话的运行时缓存需失效
     AgentRestarted { machine: String, agent: String },
 }
 

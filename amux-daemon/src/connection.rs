@@ -41,6 +41,9 @@ use crate::terminal::TerminalRegistry;
 /// 断线重连间隔。
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(60);
 
+/// 通知 Server 即将关闭后，留给 Server 关闭会话的时间。
+const SHUTDOWN_NOTICE_WAIT: Duration = Duration::from_secs(10);
+
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 struct Daemon {
@@ -53,7 +56,8 @@ struct Daemon {
     git: GitRunner,
 }
 
-/// Daemon 主循环：连接 Server，断线则周期性重连；收到终止信号时关闭所有 Agent 与终端。
+/// Daemon 主循环：连接 Server，断线则周期性重连；收到终止信号时通知 Server，
+/// 等待其关闭会话后再关闭所有 Agent 与终端（docs/DESIGN.md「Daemon 启动和关闭」）。
 pub async fn run(machine_name: String, server: String, token: String) -> Result<(), String> {
     let daemon = Arc::new(Daemon {
         machine: machine_name,
@@ -77,7 +81,13 @@ pub async fn run(machine_name: String, server: String, token: String) -> Result<
 
     tokio::select! {
         _ = reconnect_loop(&server, &token, &daemon, &outbox) => log::info!("连接循环结束"),
-        _ = shutdown_signal() => log::info!("收到终止信号"),
+        // 通知与等待期间连接循环仍在运行，Server 得以通过它关闭会话。
+        _ = async {
+            shutdown_signal().await;
+            log::info!("收到终止信号：通知 Server 并等待 {SHUTDOWN_NOTICE_WAIT:?}");
+            outbox.push(frames::notification(notify::MACHINE_SHUTDOWN, &()));
+            tokio::time::sleep(SHUTDOWN_NOTICE_WAIT).await;
+        } => {}
     }
 
     log::info!("daemon 关闭：关闭所有 agent 与终端");
