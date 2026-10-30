@@ -347,16 +347,6 @@ Server 作为 ACP client 与 Agents 通信
 
 Server 处理 ACP 事件时，以普通会话为单位串行，普通会话之间并行。
 
-### 普通会话状态
-
-普通会话状态以 Server 端会话元数据存储为权威，任何状态变更需立即落盘。
-
-普通会话状态变更
-- 新建会话时，会话状态为空闲
-- 当接收 `session/update` ACP 通知的 `state_update` 类型时
-  - 若状态为 `running` 或 `requires_action` 则为工作中
-  - 若状态为 `idle` 则为空闲
-
 ### 普通会话选项
 
 普通会话选项存储在内存中，以 Agent 侧数据为权威
@@ -399,6 +389,7 @@ Server 处理 ACP 事件时，以普通会话为单位串行，普通会话之�
 - 元数据：存储在 `~/.amux/session.sqlite` 文件中
   - 当有新的 agent 消息插入时，将会话标记为未读
   - 当用户通过会话配置成功修改模型时同步更新模型偏好
+  - 当接收 `session/update` ACP 通知的 `state_update` 类型时更新会话状态，若状态为 `running` 或 `requires_action` 则为工作中，若状态为 `idle` 则为空闲
   ```SQL
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,             -- 会话 ID
