@@ -429,6 +429,7 @@ Server 处理 ACP 事件时，以普通会话为单位串行，普通会话之�
     created_at INTEGER NOT NULL,   -- 创建时间
     updated_at INTEGER NOT NULL    -- 更新时间
   );
+  CREATE INDEX IF NOT EXISTS messages_by_created ON messages(created_at DESC, message_id DESC);
   ```
 - 活动历史：存储在 `~/.amux/sessions/<session_id>/transcript.sqlite` 文件中
   - 工具调用：基于 `session/update` ACP 通知的 `tool_call_update` 类型消息，tool name 使用 ACP 工具调用事件的 `name` 字段，若为空则使用 `kind` 字段
@@ -443,6 +444,7 @@ Server 处理 ACP 事件时，以普通会话为单位串行，普通会话之�
     created_at INTEGER NOT NULL,   -- 创建时间
     updated_at INTEGER NOT NULL    -- 更新时间
   );
+  CREATE INDEX IF NOT EXISTS activities_by_created ON activities(created_at DESC, activity_id DESC);
   ```
 - 附件：存储在 `~/.amux/sessions/<session_id>/attachments/` 目录下，每个附件保留原始后缀名，命名为 `<uuid>.<后缀>`
 - 最近工作目录：存储在 `~/.amux/config/recent_workspaces.json` 路径，格式为
@@ -672,6 +674,7 @@ Server 在接收到流式内容后，读取磁盘已有内容并按 ACP V2 流�
     parsed BOOL NOT NULL,                -- 是否已解析消息内容
     created_at INTEGER NOT NULL          -- 创建时间，agent 消息创建时间应与成员普通会话内一致
   );
+  CREATE INDEX IF NOT EXISTS messages_by_created ON messages(created_at DESC, id DESC);
   ```
 - 附件存储：存储在 `~/.amux/groups/<group_id>/attachments/` 目录下，每个附件保留原始后缀名，命名为 `<uuid>.<后缀>`
 - 群聊预设成员：存储在 `~/.amux/config/group_members.json` 路径
