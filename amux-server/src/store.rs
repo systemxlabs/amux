@@ -485,7 +485,7 @@ impl Store {
         let conn = transcript.lock();
         let mut stmt = match conn.prepare(
             "SELECT message_id, role, content, created_at, updated_at FROM messages
-             ORDER BY updated_at DESC, message_id DESC LIMIT ?1 OFFSET ?2",
+             ORDER BY created_at DESC, message_id DESC LIMIT ?1 OFFSET ?2",
         ) {
             Ok(stmt) => stmt,
             Err(_) => return (Vec::new(), false),
@@ -624,7 +624,7 @@ impl Store {
         let conn = transcript.lock();
         let mut stmt = match conn.prepare(
             "SELECT activity_id, content FROM activities
-             ORDER BY updated_at DESC, activity_id DESC LIMIT ?1 OFFSET ?2",
+             ORDER BY created_at DESC, activity_id DESC LIMIT ?1 OFFSET ?2",
         ) {
             Ok(stmt) => stmt,
             Err(_) => return (Vec::new(), false),
@@ -1844,7 +1844,11 @@ const TRANSCRIPT_SCHEMA: &str = "
         content TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
-    );";
+    );
+    CREATE INDEX IF NOT EXISTS messages_by_created
+        ON messages(created_at DESC, message_id DESC);
+    CREATE INDEX IF NOT EXISTS activities_by_created
+        ON activities(created_at DESC, activity_id DESC);";
 
 /// `workflow.sqlite` 表结构。
 const WORKFLOW_SCHEMA: &str = "
@@ -1896,7 +1900,9 @@ const GROUP_TRANSCRIPT_SCHEMA: &str = "
         user_content TEXT,
         parsed BOOL NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL
-    );";
+    );
+    CREATE INDEX IF NOT EXISTS messages_by_created
+        ON messages(created_at DESC, id DESC);";
 
 /// `automation.sqlite` 表结构（独立数据库按 docs/DESIGN.md「自动化存储」）。
 const AUTOMATION_SCHEMA: &str = "
