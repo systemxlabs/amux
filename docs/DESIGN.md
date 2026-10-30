@@ -342,6 +342,8 @@ Server 作为 ACP client 与 Agents 通信
 - 取消会话：当用户取消会话时，向 Agent 发送 `session/cancel` 通知来取消会话执行
 - 删除会话：当用户删除会话时，如果会话已打开，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，如果 Agent 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
 
+Server 处理 ACP 事件时，以普通会话为单位串行，普通会话之间并行。
+
 ### 普通会话状态
 
 普通会话状态以 Server 端会话元数据存储为权威，任何状态变更需立即落盘。
