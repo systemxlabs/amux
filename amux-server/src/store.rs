@@ -330,6 +330,14 @@ impl Store {
         );
     }
 
+    /// 收到 agent 消息：标记未读并刷新更新时间。合成一条语句，避免流式分片每次两次加锁。
+    pub fn touch_unread(&self, id: &str) {
+        let _ = self.sessions.lock().execute(
+            "UPDATE sessions SET unread = 1, updated_at = ?2 WHERE id = ?1",
+            params![id, now_ms() as i64],
+        );
+    }
+
     pub fn agent_session_id(&self, id: &str) -> Option<String> {
         self.sessions
             .lock()
@@ -1046,6 +1054,28 @@ impl Store {
             .into_iter()
             .map(|member| member.session_id)
             .collect()
+    }
+
+    /// 群聊是否已引用该成员普通会话消息（流式消息只保留一条引用）。
+    pub fn group_message_exists(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        session_message_id: &str,
+    ) -> bool {
+        let Ok(Some(transcript)) = self.group_transcript(group_id, false) else {
+            return false;
+        };
+        let conn = transcript.lock();
+        conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM messages
+                WHERE group_id = ?1 AND member_id = ?2 AND session_message_id = ?3
+             )",
+            params![group_id, member_id, session_message_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false)
     }
 
     /// 追加一条群聊消息（用户消息直接存内容；成员消息存普通会话消息引用）。

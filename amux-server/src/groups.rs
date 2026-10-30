@@ -439,6 +439,10 @@ fn validate_members(members: &[GroupMemberTemplate]) -> ServerResult<()> {
 /// （docs/DESIGN.md「群聊会话存储」）。
 fn record_member_output(store: &Store, session_id: &str, message_id: &str) -> Option<String> {
     let member = store.group_member_by_session(session_id)?;
+    // 同一条流式消息只保留一条群聊引用；已入群聊的分片直接跳过，避免重复读取完整消息。
+    if store.group_message_exists(&member.group_id, &member.id, message_id) {
+        return None;
+    }
     let content = store.session_message(&member.session_id, message_id)?;
     if content.is_empty() || is_blank_output(&content) {
         return None;

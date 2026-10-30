@@ -723,14 +723,14 @@ impl SessionService {
                 state,
                 reason,
             } => {
-                let session = self.session_of_agent(&agent_session_id)?;
+                let session_id = self.session_id_of_agent(&agent_session_id)?;
                 if state == SessionState::Idle {
-                    self.caches.live_activity.lock().remove(&session.id);
+                    self.caches.live_activity.lock().remove(&session_id);
                 }
-                let old_state = self.store.session(&session.id)?.state;
-                self.store.set_state(&session.id, state);
+                let old_state = self.store.session(&session_id)?.state;
+                self.store.set_state(&session_id, state);
                 Some(StateApplied {
-                    session_id: session.id,
+                    session_id,
                     old_state,
                     new_state: state,
                     reason,
@@ -741,9 +741,9 @@ impl SessionService {
                 message_id,
                 update,
             } => {
-                let session = self.session_of_agent(&agent_session_id)?;
+                let session_id = self.session_id_of_agent(&agent_session_id)?;
                 self.store
-                    .update_message(&session.id, &message_id, "agent", now_ms(), |current| {
+                    .update_message(&session_id, &message_id, "agent", now_ms(), |current| {
                         match update {
                             MessageUpdate::Chunk(block) => {
                                 let mut blocks = current.unwrap_or_default();
@@ -753,8 +753,7 @@ impl SessionService {
                             MessageUpdate::Snapshot(content) => content.unwrap_or_default(),
                         }
                     });
-                self.store.set_session_unread(&session.id, true);
-                self.store.touch(&session.id);
+                self.store.touch_unread(&session_id);
                 None
             }
             AcpEvent::Thinking {
@@ -762,11 +761,11 @@ impl SessionService {
                 message_id,
                 update,
             } => {
-                let session = self.session_of_agent(&agent_session_id)?;
+                let session_id = self.session_id_of_agent(&agent_session_id)?;
                 let id = format!("think-{message_id}");
                 let now = now_ms();
                 self.store
-                    .update_activity(&session.id, &id, "thinking", now, |current| {
+                    .update_activity(&session_id, &id, "thinking", now, |current| {
                         let mut thinking = match current {
                             Some(Activity::Thinking { thinking, .. }) => thinking,
                             _ => String::new(),
@@ -783,7 +782,7 @@ impl SessionService {
                             thinking,
                         }
                     });
-                self.set_live_activity(&session.id, id);
+                self.set_live_activity(&session_id, id);
                 None
             }
             AcpEvent::Compaction {
@@ -792,10 +791,10 @@ impl SessionService {
                 status,
                 update,
             } => {
-                let session = self.session_of_agent(&agent_session_id)?;
+                let session_id = self.session_id_of_agent(&agent_session_id)?;
                 let now = now_ms();
                 self.store.update_activity(
-                    &session.id,
+                    &session_id,
                     &compaction_id,
                     "compaction",
                     now,
@@ -831,7 +830,7 @@ impl SessionService {
                     },
                 );
                 if status == CompactionStatus::InProgress {
-                    self.set_live_activity(&session.id, compaction_id);
+                    self.set_live_activity(&session_id, compaction_id);
                 }
                 None
             }
@@ -844,10 +843,10 @@ impl SessionService {
                 title,
                 parameters,
             } => {
-                let session = self.session_of_agent(&agent_session_id)?;
+                let session_id = self.session_id_of_agent(&agent_session_id)?;
                 let now = now_ms();
                 self.store.update_activity(
-                    &session.id,
+                    &session_id,
                     &tool_call_id,
                     "tool_call",
                     now,
@@ -870,7 +869,7 @@ impl SessionService {
                 if let Some(ToolCallStatus::Pending | ToolCallStatus::InProgress) = status {
                     // 工具调用终态不立即结束实时活动；由 state_update=idle 统一清空，
                     // 避免前台查询 ongoing_activity 时已提前为空（docs/DESIGN.md「普通会话实时活动」）。
-                    self.set_live_activity(&session.id, tool_call_id);
+                    self.set_live_activity(&session_id, tool_call_id);
                 }
                 None
             }
@@ -880,7 +879,7 @@ impl SessionService {
                 title,
                 description,
             } => {
-                let session = self.session_of_agent(&agent_session_id)?;
+                let session_id = self.session_id_of_agent(&agent_session_id)?;
                 let id = format!("notice-{}", Uuid::new_v4());
                 let activity = Activity::Notice {
                     id: id.clone(),
@@ -891,15 +890,15 @@ impl SessionService {
                 };
                 let content = serde_json::to_string(&activity).unwrap_or_default();
                 self.store
-                    .upsert_activity(&session.id, &id, "notice", &content, now_ms());
+                    .upsert_activity(&session_id, &id, "notice", &content, now_ms());
                 None
             }
             AcpEvent::Error {
                 agent_session_id,
                 message,
             } => {
-                if let Some(session) = self.session_of_agent(&agent_session_id) {
-                    self.record_error(&session.id, &message);
+                if let Some(session_id) = self.session_id_of_agent(&agent_session_id) {
+                    self.record_error(&session_id, &message);
                 }
                 None
             }
@@ -907,8 +906,8 @@ impl SessionService {
                 agent_session_id,
                 options,
             } => {
-                if let Some(session) = self.session_of_agent(&agent_session_id) {
-                    self.caches.options.lock().insert(session.id, options);
+                if let Some(session_id) = self.session_id_of_agent(&agent_session_id) {
+                    self.caches.options.lock().insert(session_id, options);
                 }
                 None
             }
@@ -916,8 +915,8 @@ impl SessionService {
                 agent_session_id,
                 commands,
             } => {
-                if let Some(session) = self.session_of_agent(&agent_session_id) {
-                    self.caches.commands.lock().insert(session.id, commands);
+                if let Some(session_id) = self.session_id_of_agent(&agent_session_id) {
+                    self.caches.commands.lock().insert(session_id, commands);
                 }
                 None
             }
@@ -925,8 +924,8 @@ impl SessionService {
                 agent_session_id,
                 entries,
             } => {
-                if let Some(session) = self.session_of_agent(&agent_session_id) {
-                    self.caches.plans.lock().insert(session.id, entries);
+                if let Some(session_id) = self.session_id_of_agent(&agent_session_id) {
+                    self.caches.plans.lock().insert(session_id, entries);
                 }
                 None
             }
@@ -935,13 +934,13 @@ impl SessionService {
                 used,
                 size,
             } => {
-                if let Some(session) = self.session_of_agent(&agent_session_id) {
+                if let Some(session_id) = self.session_id_of_agent(&agent_session_id) {
                     let usage = Usage { used, size };
                     let mut usages = self.caches.usages.lock();
                     if usage.is_empty() {
-                        usages.remove(&session.id);
+                        usages.remove(&session_id);
                     } else {
-                        usages.insert(session.id, usage);
+                        usages.insert(session_id, usage);
                     }
                 }
                 None
@@ -953,16 +952,6 @@ impl SessionService {
                 None
             }
         }
-    }
-
-    fn session_of_agent(&self, agent_session_id: &str) -> Option<Session> {
-        let session_id = self
-            .caches
-            .agent_sessions
-            .lock()
-            .get(agent_session_id)
-            .cloned()?;
-        self.store.session(&session_id)
     }
 
     /// 后台维护：关闭长时间无活动的 agent 会话、删除长期无输入输出的终端。
