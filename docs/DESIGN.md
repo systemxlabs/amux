@@ -49,6 +49,7 @@ Daemon 主动推送通知
 | 通知 | 描述 |
 |---|---|
 | `acp` | ACP 消息转发 |
+| `machine.shutdown` | Daemon 即将关闭 |
 | `terminal.output` | 向每个订阅方独立推送终端输出（包括 exit） |
 
 Server 主动推送通知
@@ -184,7 +185,7 @@ Daemon 启动和关闭由用户手动执行，启动参数包括
 
 Daemon 启动时对 `~/.amux/daemon/<机器名>.lock` 锁文件加排他锁，加锁失败则打印日志并退出，持锁进程退出（含崩溃）时锁自动释放。
 
-Daemon 关闭时，关闭所有已启动的 Agents。
+Daemon 关闭时，向 Server 发送即将关闭事件，等待 10s，然后关闭所有已启动的 Agents。
 
 ### Agent 发现和启动
 
@@ -310,7 +311,7 @@ Server 启动和关闭由用户手动执行，启动参数包括
 
 Server 的 WebSocket 监听地址为 `ws://<host>:<port>/daemon`。
 
-Server 关闭时，关闭所有打开的 Agent 侧会话。
+Server 关闭时，取消并关闭所有打开的 Agent 侧会话，然后固定等待 10s。
 
 ### Agent 生命周期
 
@@ -324,6 +325,8 @@ Server 关闭时，关闭所有打开的 Agent 侧会话。
     1. Server 发送命令让 Daemon 发现机器上已安装的 agents
     2. 如果 agent 未启动，则启动 agent 并执行 ACP 初始化
     3. 如果 agent 已启动，则直接复用 Server 侧持有的该 agent 的活跃 ACP 连接记录
+
+Server 接收 Daemon 即将关闭事件时，取消并关闭该机器所有打开的 Agent 侧会话。
 
 Server 可中途重启某一 Agent（无论是否已启动）。
 
@@ -350,8 +353,6 @@ Server 处理 ACP 事件时，以普通会话为单位串行，普通会话之�
 
 普通会话状态变更
 - 新建会话时，会话状态为空闲
-- Server 重启后，其上所有普通会话状态应置为空闲
-- Agent 重启后，其上所有普通会话状态置为空闲
 - 当接收 `session/update` ACP 通知的 `state_update` 类型时
   - 若状态为 `running` 或 `requires_action` 则为工作中
   - 若状态为 `idle` 则为空闲
