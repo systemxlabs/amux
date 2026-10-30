@@ -50,6 +50,7 @@ import {
   triggerAutomation,
 } from "../core/actions";
 import {
+  ensureAutomationTarget,
   loadMoreAutomationGroups,
   loadMoreAutomationSessions,
   loadMoreAutomationWorkflows,
@@ -635,6 +636,8 @@ function AutomationEditor({
 
   useEffect(() => {
     void Promise.all([refreshNewSession(core), refreshAutomations(core)]);
+    // 候选只加载第一页：编辑较旧的自动化时补上其目标，否则下拉框显示不出已选项。
+    if (initial !== undefined) void ensureAutomationTarget(core, initial.sessionOptions);
   }, [core]);
 
   const agents =

@@ -18,6 +18,7 @@ import type {
 } from "../lib/types";
 import { Core } from "./core";
 import {
+  ensureAutomationTarget,
   loadOlderList,
   refreshDetails,
   refreshInteraction,
@@ -215,6 +216,36 @@ describe("loadOlderList", () => {
       "w2",
     ]);
     expect(core.state.listPaging.loadingOlder).toBe(false);
+  });
+});
+
+describe("ensureAutomationTarget", () => {
+  it("目标不在第一页候选里时按 ID 补齐，编辑时下拉框才能显示已选项", async () => {
+    const core = new Core();
+    core.state.automationSessions = [session("newer", 300)];
+    const client = {
+      session: vi.fn(async () => session("older", 100)),
+    } as unknown as ApiClient;
+    core.client = client;
+
+    await ensureAutomationTarget(core, { mode: "existing_session", sessionId: "older" });
+
+    expect(client.session).toHaveBeenCalledWith("older");
+    expect(core.state.automationSessions.map((item) => item.id)).toEqual(["newer", "older"]);
+  });
+
+  it("目标已在候选中时不追加也不请求", async () => {
+    const core = new Core();
+    core.state.automationSessions = [session("older", 100)];
+    const client = {
+      session: vi.fn(async () => session("older", 100)),
+    } as unknown as ApiClient;
+    core.client = client;
+
+    await ensureAutomationTarget(core, { mode: "existing_session", sessionId: "older" });
+
+    expect(client.session).not.toHaveBeenCalled();
+    expect(core.state.automationSessions).toHaveLength(1);
   });
 });
 

@@ -4,6 +4,7 @@
 
 import type {
   Activity,
+  AutomationSessionOptions,
   GroupMessage,
   HistoryItem,
   ListEntry,
@@ -127,6 +128,55 @@ export async function resetAutomationTargets(core: Core): Promise<void> {
     loadMoreAutomationWorkflows(core),
     loadMoreAutomationGroups(core),
   ]);
+}
+
+/** 编辑自动化时确保目标出现在候选里：候选只加载第一页，较旧的目标可能不在其中。 */
+export async function ensureAutomationTarget(
+  core: Core,
+  options: AutomationSessionOptions,
+): Promise<void> {
+  const client = core.client;
+  if (!client) return;
+  try {
+    switch (options.mode) {
+      case "existing_session": {
+        if (core.state.automationSessions.some((item) => item.id === options.sessionId)) return;
+        const session = await client.session(options.sessionId);
+        core.update((state) => {
+          state.automationSessions = mergeTarget(state.automationSessions, session);
+        });
+        return;
+      }
+      case "existing_workflow": {
+        if (core.state.automationWorkflows.some((item) => item.id === options.workflowId)) return;
+        const workflow = await client.workflow(options.workflowId);
+        core.update((state) => {
+          state.automationWorkflows = mergeTarget(state.automationWorkflows, workflow);
+        });
+        return;
+      }
+      case "existing_group": {
+        if (core.state.automationGroups.some((item) => item.id === options.groupId)) return;
+        const group = await client.group(options.groupId);
+        core.update((state) => {
+          state.automationGroups = mergeTarget(state.automationGroups, group);
+        });
+        return;
+      }
+      default:
+        return;
+    }
+  } catch {
+    // 目标已不存在：保持未选择，保存时再按现有校验提示
+  }
+}
+
+function mergeTarget<T extends { id: string; pinned: boolean; createdAt: number }>(
+  items: T[],
+  target: T,
+): T[] {
+  if (items.some((item) => item.id === target.id)) return items;
+  return sortAutomationTargets([...items, target]);
 }
 
 export async function loadMoreAutomationSessions(core: Core): Promise<void> {
