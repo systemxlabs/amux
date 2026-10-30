@@ -959,28 +959,32 @@ impl SessionService {
         let now = now_ms();
         let sessions = db::blocking_sync(|| self.store.sessions_all());
         for session in sessions {
+            // 只有本进程恢复过的会话才有 agent 侧资源可关闭；其余会话不必读活动时间
+            // （读取会打开/查询 transcript，并把旧会话挤进 LRU 缓存）。
+            if !self.caches.resumed.lock().contains(&session.id) {
+                continue;
+            }
             // 从未有活动的会话以创建时间为基准，避免会话刚建好就被关闭
             let last_activity = db::blocking_sync(|| self.store.last_activity_at(&session.id))
                 .unwrap_or(session.created_at);
-            let resumed = self.caches.resumed.lock().contains(&session.id);
-            if should_close_idle_agent_session(idle_expired(&session, last_activity, now), resumed)
+            if !idle_expired(&session, last_activity, now) {
+                continue;
+            }
+            if let Some(agent_session_id) =
+                db::blocking_sync(|| self.store.agent_session_id(&session.id))
             {
-                if let Some(agent_session_id) =
-                    db::blocking_sync(|| self.store.agent_session_id(&session.id))
-                {
-                    if let Ok(conn) = self.machines.acp(&session.machine, &session.agent).await {
-                        if let Err(error) = conn.close(Some(&session.id), &agent_session_id).await {
-                            log::warn!(
-                                "session/close 失败: session={} agent_session={agent_session_id}: {error}",
-                                session.id
-                            );
-                        }
-                        self.caches.forget(&session.id);
-                        log::info!(
-                            "会话长时间无活动，已关闭 agent 侧会话: session={} agent_session={agent_session_id}",
+                if let Ok(conn) = self.machines.acp(&session.machine, &session.agent).await {
+                    if let Err(error) = conn.close(Some(&session.id), &agent_session_id).await {
+                        log::warn!(
+                            "session/close 失败: session={} agent_session={agent_session_id}: {error}",
                             session.id
                         );
                     }
+                    self.caches.forget(&session.id);
+                    log::info!(
+                        "会话长时间无活动，已关闭 agent 侧会话: session={} agent_session={agent_session_id}",
+                        session.id
+                    );
                 }
             }
         }
@@ -1081,12 +1085,6 @@ fn apply_tool_call_patch(
     }
 }
 
-/// 只有内存中仍标记为 resumed 的会话才需要关闭；关闭后该标记会被移除，
-/// 避免后续维护仅凭持久化的 agent_session_id 反复关闭同一会话。
-fn should_close_idle_agent_session(idle_expired: bool, resumed: bool) -> bool {
-    idle_expired && resumed
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1147,12 +1145,6 @@ mod tests {
             now - IDLE_CLOSE_AFTER_MS - 1,
             now
         ));
-    }
-
-    #[test]
-    fn idle_agent_session_closes_only_while_resumed() {
-        assert!(!should_close_idle_agent_session(true, false));
-        assert!(should_close_idle_agent_session(true, true));
     }
 
     #[test]
