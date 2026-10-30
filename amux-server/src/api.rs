@@ -18,6 +18,7 @@ use axum::{Json, Router};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
+use uuid::Uuid;
 
 use crate::attachments::{AttachmentOwner, MAX_ATTACHMENT_BYTES};
 use crate::db;
@@ -661,33 +662,35 @@ async fn terminal_output(
         let check = id.clone();
         db::blocking(move || sessions.get(&check)).await??
     };
-    let attach = state
-        .machines
-        .terminal_attach(&session.machine, &id, &terminal, query.sequence)
-        .await?;
-    let (pending, receiver) = state
-        .terminals
-        .register(&attach.subscription_id, &session.machine);
+    // 订阅 ID 由 Server 生成并先注册：attach 应答前到达的输出也有归属。
+    let subscription_id = Uuid::new_v4().to_string();
+    let receiver = state.terminals.register(&subscription_id, &session.machine);
     let guard = TerminalDetachGuard {
         machines: state.machines.clone(),
         relay: Arc::clone(&state.terminals),
         machine: session.machine.clone(),
-        subscription_id: attach.subscription_id.clone(),
+        subscription_id: subscription_id.clone(),
     };
-    let pending = futures_util::stream::iter(pending);
+    state
+        .machines
+        .terminal_attach(
+            &session.machine,
+            &id,
+            &terminal,
+            &subscription_id,
+            query.sequence,
+        )
+        .await?;
     let live = futures_util::stream::unfold(receiver, |mut receiver| async move {
         receiver.recv().await.map(|output| (output, receiver))
     });
-    let stream = futures_util::StreamExt::map(
-        futures_util::StreamExt::chain(pending, live),
-        move |output| {
-            let _ = &guard;
-            Ok(Event::default()
-                .event("output")
-                .json_data(output)
-                .expect("终端输出事件始终可序列化"))
-        },
-    );
+    let stream = futures_util::StreamExt::map(live, move |output| {
+        let _ = &guard;
+        Ok(Event::default()
+            .event("output")
+            .json_data(output)
+            .expect("终端输出事件始终可序列化"))
+    });
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))

@@ -492,6 +492,8 @@ pub struct TerminalOpenResult {
 pub struct TerminalAttachParams {
     pub session_id: String,
     pub terminal_id: String,
+    /// 订阅 ID，由 Server 指定；输出通知按此 ID 回传
+    pub subscription_id: String,
     /// 期望收到的下一个输出序号（含）；缺省表示从缓冲区开头重放
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,

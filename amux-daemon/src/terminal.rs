@@ -323,12 +323,13 @@ impl TerminalRegistry {
     }
 
     /// 订阅终端：先重放环形缓冲中游标之后的部分，再接收实时输出。
+    /// 订阅 ID 由 Server 指定，输出通知按该 ID 回传。
     pub fn attach(
         self: &Arc<Self>,
         params: TerminalAttachParams,
         outbox: Arc<Outbox>,
     ) -> RpcResult<TerminalAttachResult> {
-        let subscription_id = uuid::Uuid::new_v4().to_string();
+        let subscription_id = params.subscription_id;
         let (tx, rx) = mpsc::unbounded_channel::<TerminalEvent>();
         {
             let mut terminals = self.terminals.lock();
@@ -636,11 +637,13 @@ mod tests {
         registry.publish_output(&terminal_id, b"hello".to_vec());
 
         let outbox = Arc::new(Outbox::new());
-        let attach = registry
+        let subscription_id = "sub-test".to_string();
+        registry
             .attach(
                 TerminalAttachParams {
                     session_id: "s1".into(),
                     terminal_id: terminal_id.clone(),
+                    subscription_id: subscription_id.clone(),
                     sequence: None,
                 },
                 Arc::clone(&outbox),
@@ -652,7 +655,7 @@ mod tests {
             outbox.ack(seq);
             let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
             let params = &value["params"];
-            if params["subscriptionId"].as_str() != Some(&attach.subscription_id) {
+            if params["subscriptionId"].as_str() != Some(&subscription_id) {
                 continue;
             }
             if params["data"].as_str() != Some("aGVsbG8=") {
@@ -716,6 +719,7 @@ mod tests {
                 TerminalAttachParams {
                     session_id: "s1".into(),
                     terminal_id: "nope".into(),
+                    subscription_id: "sub-test".into(),
                     sequence: None,
                 },
                 Arc::new(Outbox::new()),

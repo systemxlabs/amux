@@ -321,11 +321,13 @@ impl MachineHub {
         Ok(result.terminal_id)
     }
 
+    /// 订阅终端；订阅 ID 由调用方指定，输出按该 ID 回传。
     pub async fn terminal_attach(
         &self,
         machine: &str,
         session_id: &str,
         terminal_id: &str,
+        subscription_id: &str,
         sequence: Option<u64>,
     ) -> ServerResult<TerminalAttachResult> {
         self.machine(machine)?
@@ -334,6 +336,7 @@ impl MachineHub {
                 TerminalAttachParams {
                     session_id: session_id.to_string(),
                     terminal_id: terminal_id.to_string(),
+                    subscription_id: subscription_id.to_string(),
                     sequence,
                 },
             )
@@ -618,7 +621,16 @@ impl MachineHub {
             }
             notify::TERMINAL_OUTPUT => {
                 if let Some(output) = decode::<TerminalOutputNotification>(notification.params) {
-                    self.terminals.forward(output);
+                    let subscription_id = output.subscription_id.clone();
+                    if !self.terminals.forward(output) {
+                        // 订阅已失效（SSE 已结束或属于更早的连接）：通知 Daemon 取消，避免持续推送。
+                        log::info!("收到未知终端订阅的输出，取消订阅: {subscription_id}");
+                        let hub = self.clone();
+                        let machine_name = machine.name.clone();
+                        tokio::spawn(async move {
+                            hub.terminal_detach(&machine_name, &subscription_id).await;
+                        });
+                    }
                 }
             }
             other => log::debug!("忽略未知通知: {other}"),
