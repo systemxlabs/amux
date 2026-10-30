@@ -1935,8 +1935,12 @@ const AUTOMATION_SCHEMA: &str = "
 
 fn open_db(path: &Path, schema: &str) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("打开 {} 失败: {e}", path.display()))?;
-    conn.execute_batch(&format!("PRAGMA journal_mode = WAL;\n{schema}"))
-        .map_err(|e| format!("初始化表失败: {e}"))?;
+    // WAL + NORMAL：提交不再逐次 fsync。应用崩溃不丢已提交事务；断电可能丢最近的提交，
+    // 但数据库保持一致（项目约定接受部分数据丢失）。
+    conn.execute_batch(&format!(
+        "PRAGMA journal_mode = WAL;\nPRAGMA synchronous = NORMAL;\n{schema}"
+    ))
+    .map_err(|e| format!("初始化表失败: {e}"))?;
     Ok(conn)
 }
 
