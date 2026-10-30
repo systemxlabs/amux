@@ -38,7 +38,7 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 | `fs.list` | 分页查看指定路径文件夹列表 |
 | `fs.read` | 分页查看指定路径文本文件内容 |
 | `terminal.open` | 打开一个终端 |
-| `terminal.attach` | 订阅一个终端，返回订阅 ID |
+| `terminal.attach` | 订阅一个终端，传入订阅 ID |
 | `terminal.detach` | 取消订阅终端 |
 | `terminal.list` | 返回终端列表 |
 | `terminal.resize` | 调整指定终端窗口大小 |
