@@ -1,6 +1,9 @@
 //! ACP 事件消费：把 Agent 通知落到会话与工作流（`SessionService::apply` + 工作流驱动）。
 //!
-//! 事件循环只做状态推进与增量落盘；可能发起 ACP 请求的驱动按聚合分队列串行执行：
+//! ACP 事件以普通会话为单位串行、普通会话之间并行：同一批事件按会话分组后各自在
+//! 阻塞线程池落盘，批次全部完成才取下一批，因此同一会话内严格保序，不同会话互不阻塞。
+//!
+//! 可能发起 ACP 请求的驱动按聚合分队列串行执行：
 //! - 群聊成员会话 → 该群聊的队列
 //! - 工作流关联会话 → 该工作流的队列
 //! - 其余普通会话 → 各自的会话队列
@@ -14,6 +17,7 @@ use std::time::Duration;
 use amux_common::domain::SessionState;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::acp::AcpEvent;
 use crate::automations::AutomationService;
@@ -174,59 +178,118 @@ pub async fn run(
         if count == 0 {
             break;
         }
-        let events = std::mem::take(&mut batch);
-        let sessions = Arc::clone(&sessions);
-        let groups = Arc::clone(&groups);
-        let store = Arc::clone(&store);
-        let jobs = db::blocking(move || {
-            let mut jobs = Vec::new();
-            let mut parse_groups = HashSet::new();
-            for event in events {
-                // 群聊成员输出需要引用普通会话消息 ID，apply 前先取出事件内容。
-                let agent_message = match &event {
-                    AcpEvent::Message {
-                        agent_session_id,
-                        message_id,
-                        ..
-                    } => Some((agent_session_id.clone(), message_id.clone())),
-                    _ => None,
-                };
-                let state = sessions.apply(event);
-                if let Some((agent_session_id, message_id)) = agent_message {
-                    if let Some(session_id) = sessions.session_id_of_agent(&agent_session_id) {
-                        if let Some(group_id) = groups.on_member_output(&session_id, &message_id) {
-                            parse_groups.insert(group_id);
-                        }
-                    }
-                }
-                if let Some(applied) = state {
-                    let group_id = store.group_of_session(&applied.session_id);
-                    let workflow_id = store.workflow_of_session(&applied.session_id);
-                    jobs.push(FollowUp::State {
-                        applied,
-                        group_id,
-                        workflow_id,
-                    });
-                }
-            }
-            for group_id in parse_groups {
-                jobs.push(FollowUp::GroupParse(group_id));
-            }
-            jobs
-        })
-        .await;
-        match jobs {
-            Ok(jobs) => {
-                for job in jobs {
-                    followups.dispatch(job);
-                }
-            }
-            Err(error) => log::warn!("ACP 事件落盘失败: {error}"),
+        let jobs = apply_batch(std::mem::take(&mut batch), &sessions, &groups, &store).await;
+        for job in jobs {
+            followups.dispatch(job);
         }
         batch = Vec::with_capacity(EVENT_BATCH);
     }
 
     // 事件通道关闭：让所有队列在空闲超时后自行回收，不阻塞 Server 关闭。
+}
+
+/// 应用一批 ACP 事件，返回状态落定产生的驱动任务。
+///
+/// `AgentRestarted` 不是普通会话事件，以它为界把批次切成若干段：段内事件并行落盘，
+/// 重启事件在其之前的事件全部落盘后应用，保证重启前的状态变更已生效。
+async fn apply_batch(
+    events: Vec<AcpEvent>,
+    sessions: &Arc<SessionService>,
+    groups: &Arc<GroupService>,
+    store: &Arc<Store>,
+) -> Vec<FollowUp> {
+    let mut jobs = Vec::new();
+    let mut segment = Vec::new();
+    for event in events {
+        if let AcpEvent::AgentRestarted { .. } = event {
+            jobs.extend(apply_segment(std::mem::take(&mut segment), sessions, groups, store).await);
+            let sessions = Arc::clone(sessions);
+            if let Err(error) = db::blocking(move || sessions.apply(event)).await {
+                log::warn!("agent 重启落盘失败: {error}");
+            }
+        } else {
+            segment.push(event);
+        }
+    }
+    jobs.extend(apply_segment(segment, sessions, groups, store).await);
+    jobs
+}
+
+/// 按普通会话分组并行落盘一个事件段。段内不含 `AgentRestarted`。
+async fn apply_segment(
+    events: Vec<AcpEvent>,
+    sessions: &Arc<SessionService>,
+    groups: &Arc<GroupService>,
+    store: &Arc<Store>,
+) -> Vec<FollowUp> {
+    let mut by_session: HashMap<String, Vec<AcpEvent>> = HashMap::new();
+    for event in events {
+        let agent_session_id = event.agent_session_id().expect("事件段内不含 agent 级事件");
+        let session_id = sessions
+            .session_id_of_agent(agent_session_id)
+            .unwrap_or_else(|| agent_session_id.to_string());
+        by_session.entry(session_id).or_default().push(event);
+    }
+
+    let mut tasks = JoinSet::new();
+    for (_, events) in by_session {
+        let sessions = Arc::clone(sessions);
+        let groups = Arc::clone(groups);
+        let store = Arc::clone(store);
+        tasks.spawn_blocking(move || apply_session_events(events, &sessions, &groups, &store));
+    }
+
+    let mut jobs = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(session_jobs) => jobs.extend(session_jobs),
+            Err(error) => log::warn!("ACP 事件落盘失败: {error}"),
+        }
+    }
+    jobs
+}
+
+/// 顺序应用同一普通会话的一批事件；不同会话的批次并行执行。
+fn apply_session_events(
+    events: Vec<AcpEvent>,
+    sessions: &SessionService,
+    groups: &GroupService,
+    store: &Store,
+) -> Vec<FollowUp> {
+    let mut jobs = Vec::new();
+    let mut parse_groups = HashSet::new();
+    for event in events {
+        // 群聊成员输出需要引用普通会话消息 ID，apply 前先取出事件内容。
+        let agent_message = match &event {
+            AcpEvent::Message {
+                agent_session_id,
+                message_id,
+                ..
+            } => Some((agent_session_id.clone(), message_id.clone())),
+            _ => None,
+        };
+        let state = sessions.apply(event);
+        if let Some((agent_session_id, message_id)) = agent_message {
+            if let Some(session_id) = sessions.session_id_of_agent(&agent_session_id) {
+                if let Some(group_id) = groups.on_member_output(&session_id, &message_id) {
+                    parse_groups.insert(group_id);
+                }
+            }
+        }
+        if let Some(applied) = state {
+            let group_id = store.group_of_session(&applied.session_id);
+            let workflow_id = store.workflow_of_session(&applied.session_id);
+            jobs.push(FollowUp::State {
+                applied,
+                group_id,
+                workflow_id,
+            });
+        }
+    }
+    for group_id in parse_groups {
+        jobs.push(FollowUp::GroupParse(group_id));
+    }
+    jobs
 }
 
 /// 驱动任务的处理逻辑。同一聚合的 job 由同一个 worker 串行消费。

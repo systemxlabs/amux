@@ -115,6 +115,48 @@ pub enum AcpEvent {
     AgentRestarted { machine: String, agent: String },
 }
 
+impl AcpEvent {
+    /// 事件所属的 agent 会话；`AgentRestarted` 是 agent 级事件，不属于单个会话。
+    pub fn agent_session_id(&self) -> Option<&str> {
+        match self {
+            AcpEvent::State {
+                agent_session_id, ..
+            }
+            | AcpEvent::Message {
+                agent_session_id, ..
+            }
+            | AcpEvent::Thinking {
+                agent_session_id, ..
+            }
+            | AcpEvent::Compaction {
+                agent_session_id, ..
+            }
+            | AcpEvent::ToolCall {
+                agent_session_id, ..
+            }
+            | AcpEvent::Notice {
+                agent_session_id, ..
+            }
+            | AcpEvent::Error {
+                agent_session_id, ..
+            }
+            | AcpEvent::Options {
+                agent_session_id, ..
+            }
+            | AcpEvent::Commands {
+                agent_session_id, ..
+            }
+            | AcpEvent::Plan {
+                agent_session_id, ..
+            }
+            | AcpEvent::Usage {
+                agent_session_id, ..
+            } => Some(agent_session_id),
+            AcpEvent::AgentRestarted { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum MessageUpdate {
     Chunk(Box<ContentBlock>),
