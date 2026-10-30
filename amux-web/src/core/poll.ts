@@ -29,7 +29,7 @@ import { markReadLocally, type Core, type SettingsTab } from "./core";
 export const SESSION_LIST_INTERVAL = 10_000;
 export const AUTOMATION_LIST_INTERVAL = 10_000;
 export const HISTORY_INTERVAL = 5_000;
-export const ONGOING_INTERVAL = 2_000;
+export const ONGOING_INTERVAL = 5_000;
 export const ACTIVITIES_INTERVAL = 10_000;
 export const PLAN_INTERVAL = 10_000;
 export const USAGE_INTERVAL = 60_000;

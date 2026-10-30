@@ -258,7 +258,7 @@ function onlineCore(client: ApiClient): Core {
 }
 
 describe("tick", () => {
-  it("打开时读取控件数据，只有实时活动每两秒刷新，重开才重新读取控件", async () => {
+  it("打开时读取控件数据，只有实时活动每五秒刷新，重开才重新读取控件", async () => {
     vi.useFakeTimers();
     try {
       const { client, calls } = recordingClient({
@@ -271,7 +271,7 @@ describe("tick", () => {
       await Promise.all([refreshInteraction(core), tick(core)]);
       const count = (name: string) => calls.filter((call) => call === name).length;
       expect(count("ongoingActivity")).toBe(1);
-      vi.advanceTimersByTime(1999);
+      vi.advanceTimersByTime(4_999);
       await tick(core);
       expect(count("ongoingActivity")).toBe(1);
       vi.advanceTimersByTime(1);
