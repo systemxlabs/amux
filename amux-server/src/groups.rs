@@ -164,8 +164,9 @@ impl GroupService {
         }
     }
 
-    /// 用户往群聊发送指令：用户消息落盘后解析 @ 提及并驱动成员。
-    pub async fn prompt(&self, id: &str, input: Vec<ContentBlock>) -> ServerResult<()> {
+    /// 用户往群聊发送指令：用户消息落盘后立即返回；解析 @ 提及并驱动成员在后台进行，
+    /// 成员驱动的失败仅记录日志（docs/DESIGN.md「群聊会话驱动」）。
+    pub async fn prompt(self: &Arc<Self>, id: &str, input: Vec<ContentBlock>) -> ServerResult<()> {
         let group = db::blocking_sync(|| self.get(id))?;
         if group.title.is_empty() {
             let title = generate_title(&blocks_text(&input));
@@ -179,7 +180,11 @@ impl GroupService {
                 .insert_group_message(id, &rand_id(), None, None, Some(&content), now_ms());
             self.store.touch_group(id);
         });
-        self.parse(id).await;
+        let service = Arc::clone(self);
+        let group_id = id.to_string();
+        tokio::spawn(async move {
+            service.parse(&group_id).await;
+        });
         db::blocking_sync(|| self.recompute_state(id));
         log::info!("群聊指令已发送: group={id}");
         Ok(())
