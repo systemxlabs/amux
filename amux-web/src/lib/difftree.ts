@@ -80,3 +80,19 @@ export function allKeys(nodes: readonly DiffNode[]): string[] {
   }
   return keys;
 }
+
+/** 按树的深度优先顺序收集文件在改动列表中的下标（diff 区域渲染顺序用）。 */
+export function collectFileIndices(nodes: readonly DiffNode[]): number[] {
+  const indices: number[] = [];
+  const walk = (list: readonly DiffNode[]): void => {
+    for (const node of list) {
+      if (node.fileIx !== null) {
+        indices.push(node.fileIx);
+      } else {
+        walk(node.children);
+      }
+    }
+  };
+  walk(nodes);
+  return indices;
+}

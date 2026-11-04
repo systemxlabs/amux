@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { allKeys, buildDiffTree, type DiffNode } from "./difftree";
+import { allKeys, buildDiffTree, collectFileIndices, type DiffNode } from "./difftree";
 import type { GitDiffFile } from "./types";
 
 function file(path: string): GitDiffFile {
@@ -46,5 +46,22 @@ describe("buildDiffTree", () => {
 
   it("空改动列表得到空树", () => {
     expect(buildDiffTree([])).toEqual([]);
+  });
+});
+
+describe("collectFileIndices", () => {
+  it("按树的深度优先顺序返回文件下标，与文件树展示顺序一致", () => {
+    const files = [
+      file("src/catalog/helper/query.rs"),
+      file("Cargo.toml"),
+      file("src/catalog/schema.rs"),
+      file("src/storage/s3/parquet.rs"),
+    ];
+    // 树为「目录在前、文件在后」：src 子树全部展开后才到根目录下的 Cargo.toml。
+    expect(collectFileIndices(buildDiffTree(files))).toEqual([0, 2, 3, 1]);
+  });
+
+  it("空树返回空列表", () => {
+    expect(collectFileIndices([])).toEqual([]);
   });
 });

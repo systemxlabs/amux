@@ -20,7 +20,7 @@ import { Input } from "../../components/ui/input";
 import { sendPrompt } from "../../core/actions";
 import { useCore, useCoreState } from "../../core/store";
 import { branchLabel, preferredDiffBase } from "../../lib/branch";
-import { buildDiffTree, type DiffNode } from "../../lib/difftree";
+import { buildDiffTree, collectFileIndices, type DiffNode } from "../../lib/difftree";
 import {
   execDir,
   type GitBranch,
@@ -315,6 +315,8 @@ export function DiffPanel() {
 
   const files = diff?.files ?? [];
   const nodes = useMemo(() => buildDiffTree(diff?.files ?? []), [diff]);
+  // diff 区域按文件树的深度优先顺序渲染，与左侧文件树保持一致（docs/PRD.md「改动审查视图」）。
+  const treeFileIndices = useMemo(() => collectFileIndices(nodes), [nodes]);
   const additions = files.reduce((total, file) => total + file.additions, 0);
   const deletions = files.reduce((total, file) => total + file.deletions, 0);
 
@@ -583,7 +585,10 @@ export function DiffPanel() {
             onPointerUp={finishCodeSelectionAtEvent}
             onPointerCancel={cancelCodeSelection}
           >
-            {files.map((file, index) => (
+            {treeFileIndices.map((fileIndex) => {
+              const file = files[fileIndex];
+              const index = fileIndex;
+              return (
               <div
                 key={file.path}
                 id={`diff-file-${index}`}
@@ -742,7 +747,8 @@ export function DiffPanel() {
                   </div>
                 ) : null}
               </div>
-            ))}
+              );
+            })}
           </div>
         }
         treeSlot="diff-tree"
