@@ -199,7 +199,7 @@ export function Main() {
         {state.middle === "automation" ? (
           <AutomationListView />
         ) : state.middle === "interaction" ? (
-          <InteractionView />
+          <InteractionView key={state.open ? `${state.open.kind}:${state.open.id}` : "none"} />
         ) : (
           <NewSessionView />
         )}
